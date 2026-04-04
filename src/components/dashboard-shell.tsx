@@ -110,6 +110,8 @@ export function DashboardShell() {
   const [queryKey, setQueryKey] = useState<string | null>(null);
 
   const activeConfig = PRODUCT_CONFIGS[filters.product];
+  const showIdentifierFilters = filters.view === "seo-funnels" || filters.view === "product-performance";
+  const showConsoleFilter = filters.view === "console-funnels";
 
   async function runDashboard(nextFilters: FilterState) {
     setIsLoading(true);
@@ -250,180 +252,134 @@ export function DashboardShell() {
           </div>
 
           <div className="control-card">
-            <div className="control-section">
-              <p className="eyebrow">Current period</p>
-              <div className="filter-grid filter-grid--compact">
-                <label className="field">
-                  <span>Window</span>
-                  <select
-                    value={filters.preset}
-                    onChange={(event) => setFilters((current) => ({ ...current, preset: event.target.value as DatePreset }))}
-                  >
-                    <option value="24h">24 hours</option>
-                    <option value="7d">7 days</option>
-                    <option value="30d">30 days</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                </label>
+            <p className="eyebrow">Filters</p>
+            <div className="filter-grid filter-grid--toolbar">
+              <label className="field">
+                <span>Current window</span>
+                <select
+                  value={filters.preset}
+                  onChange={(event) => setFilters((current) => ({ ...current, preset: event.target.value as DatePreset }))}
+                >
+                  <option value="24h">24 hours</option>
+                  <option value="7d">7 days</option>
+                  <option value="30d">30 days</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
 
-                {filters.preset === "custom" ? (
-                  <>
-                    <label className="field">
-                      <span>From</span>
-                      <input
-                        type="date"
-                        value={filters.from}
-                        onChange={(event) => setFilters((current) => ({ ...current, from: event.target.value }))}
-                      />
-                    </label>
-                    <label className="field">
-                      <span>To</span>
-                      <input
-                        type="date"
-                        value={filters.to}
-                        onChange={(event) => setFilters((current) => ({ ...current, to: event.target.value }))}
-                      />
-                    </label>
-                  </>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="control-section">
-              <p className="eyebrow">Comparison period</p>
-              <div className="filter-grid filter-grid--compact">
-                <label className="field">
-                  <span>Window</span>
-                  <select
-                    value={filters.comparePreset}
-                    onChange={(event) =>
-                      setFilters((current) => ({ ...current, comparePreset: event.target.value as DatePreset }))
-                    }
-                  >
-                    <option value="24h">24 hours</option>
-                    <option value="7d">7 days</option>
-                    <option value="30d">30 days</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                </label>
-
-                {filters.comparePreset === "custom" ? (
-                  <>
-                    <label className="field">
-                      <span>From</span>
-                      <input
-                        type="date"
-                        value={filters.compareFrom}
-                        onChange={(event) =>
-                          setFilters((current) => ({ ...current, compareFrom: event.target.value }))
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>To</span>
-                      <input
-                        type="date"
-                        value={filters.compareTo}
-                        onChange={(event) => setFilters((current) => ({ ...current, compareTo: event.target.value }))}
-                      />
-                    </label>
-                  </>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="control-section">
-              <p className="eyebrow">Selection</p>
-              <div className="filter-grid">
-                {filters.view === "seo-funnels" || filters.view === "product-performance" ? (
-                  <>
-                    <label className="field">
-                      <span>Identifier type</span>
-                      <select
-                        value={filters.identifierType}
-                        onChange={(event) =>
-                          setFilters((current) => ({
-                            ...current,
-                            identifierType: event.target.value as IdentifierType,
-                            identifierValue: "",
-                          }))
-                        }
-                      >
-                        {(filters.view === "seo-funnels"
-                          ? activeConfig.funnelIdentifierTypes
-                          : activeConfig.performanceIdentifierTypes
-                        ).map((type) => (
-                          <option key={type} value={type}>
-                            {IDENTIFIER_LABELS[type]}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="field">
-                      <span>Identifier value</span>
-                      <input
-                        list="identifier-suggestions"
-                        placeholder="Optional"
-                        value={filters.identifierValue}
-                        onChange={(event) =>
-                          setFilters((current) => ({ ...current, identifierValue: event.target.value }))
-                        }
-                      />
-                      <datalist id="identifier-suggestions">
-                        {suggestionList(filters.product, filters.identifierType).map((option) => (
-                          <option key={option} value={option} />
-                        ))}
-                      </datalist>
-                    </label>
-                  </>
-                ) : null}
-
-                {filters.view === "seo-funnels" ? (
-                  <>
-                    <label className="field">
-                      <span>Main tool URL contains</span>
-                      <input
-                        placeholder="Optional"
-                        value={filters.mainTool}
-                        onChange={(event) => setFilters((current) => ({ ...current, mainTool: event.target.value }))}
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Step 2 URL contains</span>
-                      <input
-                        placeholder="studio or studio/video-generator"
-                        value={filters.stepUrl}
-                        onChange={(event) => setFilters((current) => ({ ...current, stepUrl: event.target.value }))}
-                      />
-                    </label>
-                  </>
-                ) : null}
-
-                {filters.view === "console-funnels" ? (
-                  <label className="field field--grow">
-                    <span>Console URL contains</span>
+              {filters.preset === "custom" ? (
+                <>
+                  <label className="field">
+                    <span>Current from</span>
                     <input
-                      placeholder="Example: studio/video-generator"
-                      value={filters.consoleUrl}
-                      onChange={(event) => setFilters((current) => ({ ...current, consoleUrl: event.target.value }))}
+                      type="date"
+                      value={filters.from}
+                      onChange={(event) => setFilters((current) => ({ ...current, from: event.target.value }))}
                     />
                   </label>
-                ) : null}
-
-                {filters.view === "seo-funnels" ? (
-                  <label className="field field--toggle">
-                    <span>Consolidate</span>
+                  <label className="field">
+                    <span>Current to</span>
                     <input
-                      type="checkbox"
-                      checked={filters.consolidate}
+                      type="date"
+                      value={filters.to}
+                      onChange={(event) => setFilters((current) => ({ ...current, to: event.target.value }))}
+                    />
+                  </label>
+                </>
+              ) : null}
+
+              <label className="field">
+                <span>Comparison window</span>
+                <select
+                  value={filters.comparePreset}
+                  onChange={(event) =>
+                    setFilters((current) => ({ ...current, comparePreset: event.target.value as DatePreset }))
+                  }
+                >
+                  <option value="24h">24 hours</option>
+                  <option value="7d">7 days</option>
+                  <option value="30d">30 days</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+
+              {filters.comparePreset === "custom" ? (
+                <>
+                  <label className="field">
+                    <span>Compare from</span>
+                    <input
+                      type="date"
+                      value={filters.compareFrom}
                       onChange={(event) =>
-                        setFilters((current) => ({ ...current, consolidate: event.target.checked }))
+                        setFilters((current) => ({ ...current, compareFrom: event.target.value }))
                       }
                     />
                   </label>
-                ) : null}
-              </div>
+                  <label className="field">
+                    <span>Compare to</span>
+                    <input
+                      type="date"
+                      value={filters.compareTo}
+                      onChange={(event) => setFilters((current) => ({ ...current, compareTo: event.target.value }))}
+                    />
+                  </label>
+                </>
+              ) : null}
+
+              {showIdentifierFilters ? (
+                <>
+                  <label className="field">
+                    <span>Identifier type</span>
+                    <select
+                      value={filters.identifierType}
+                      onChange={(event) =>
+                        setFilters((current) => ({
+                          ...current,
+                          identifierType: event.target.value as IdentifierType,
+                          identifierValue: "",
+                        }))
+                      }
+                    >
+                      {(filters.view === "seo-funnels"
+                        ? activeConfig.funnelIdentifierTypes
+                        : activeConfig.performanceIdentifierTypes
+                      ).map((type) => (
+                        <option key={type} value={type}>
+                          {IDENTIFIER_LABELS[type]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="field">
+                    <span>Identifier value</span>
+                    <input
+                      list="identifier-suggestions"
+                      placeholder="Optional"
+                      value={filters.identifierValue}
+                      onChange={(event) =>
+                        setFilters((current) => ({ ...current, identifierValue: event.target.value }))
+                      }
+                    />
+                    <datalist id="identifier-suggestions">
+                      {suggestionList(filters.product, filters.identifierType).map((option) => (
+                        <option key={option} value={option} />
+                      ))}
+                    </datalist>
+                  </label>
+                </>
+              ) : null}
+
+              {showConsoleFilter ? (
+                <label className="field field--wide">
+                  <span>Console URL contains</span>
+                  <input
+                    placeholder="Example: studio/ai-image-generator"
+                    value={filters.consoleUrl}
+                    onChange={(event) => setFilters((current) => ({ ...current, consoleUrl: event.target.value }))}
+                  />
+                </label>
+              ) : null}
             </div>
 
             <div className="filter-actions">

@@ -40,7 +40,7 @@ export const PRODUCT_CONFIGS: Record<ProductKey, ProductConfig> = {
     accent: "#64d6c5",
     icon: WandSparkles,
     revenueToken: "WM",
-    defaultConsoleUrl: "watermarkremover.io/video-watermark-remover",
+    defaultConsoleUrl: "mini-studio/watermarkremover",
     funnelIdentifierTypes: ["free_property", "other"],
     performanceIdentifierTypes: ["free_property", "page", "other"],
     views: ["seo-funnels", "console-funnels", "product-performance", "revenue-insights"],
@@ -53,7 +53,7 @@ export const PRODUCT_CONFIGS: Record<ProductKey, ProductConfig> = {
     accent: "#f3aa66",
     icon: ImageUpscale,
     revenueToken: "UM",
-    defaultConsoleUrl: "upscalemedia.com/image-upscaler",
+    defaultConsoleUrl: "mini-studio/upscaler",
     funnelIdentifierTypes: ["free_property", "other"],
     performanceIdentifierTypes: ["free_property", "page", "other"],
     views: ["seo-funnels", "console-funnels", "product-performance", "revenue-insights"],
@@ -105,17 +105,15 @@ export const FAILURE_IGNORE_PATTERNS = [
 ];
 
 export const PIXELBIN_TOOL_SUGGESTIONS = [
-  "ai-image-generator-from-text",
   "video-generator",
+  "ai-image-generator",
   "ai-image-editor",
-  "ai-editor",
-  "erase-bg",
   "magic-canvas",
 ];
 
 export const FREE_PROPERTY_SUGGESTIONS = [
   "watermarkremover",
   "video-watermark-remover",
-  "upscale",
+  "upscalemedia",
   "image-upscaler",
 ];

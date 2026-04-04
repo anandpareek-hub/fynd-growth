@@ -205,12 +205,8 @@ input::placeholder {
 }
 
 .control-card {
-  padding: 0.9rem;
+  padding: 0.82rem 0.88rem;
   margin-bottom: 0.9rem;
-}
-
-.control-section + .control-section {
-  margin-top: 0.9rem;
 }
 
 .section-header {
@@ -276,10 +272,19 @@ input::placeholder {
   grid-template-columns: repeat(3, minmax(0, 220px));
 }
 
+.filter-grid--toolbar {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  align-items: end;
+}
+
 .field {
   display: flex;
   flex-direction: column;
   gap: 0.34rem;
+}
+
+.field--wide {
+  grid-column: span 2;
 }
 
 .field span {
@@ -290,30 +295,11 @@ input::placeholder {
   text-transform: uppercase;
 }
 
-.field--toggle {
-  align-self: stretch;
-  justify-content: center;
-  background: var(--surface-alt);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 0.8rem 0.9rem;
-  min-width: 130px;
-}
-
-.field--toggle input {
-  width: 18px;
-  height: 18px;
-  accent-color: var(--brand);
-  padding: 0;
-  border-radius: 6px;
-  background: transparent;
-}
-
 .filter-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.65rem;
-  margin-top: 0.8rem;
+  margin-top: 0.72rem;
 }
 
 .primary-button,
@@ -653,7 +639,8 @@ tbody tr:hover {
   }
 
   .filter-grid,
-  .filter-grid--compact {
+  .filter-grid--compact,
+  .filter-grid--toolbar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -680,7 +667,12 @@ tbody tr:hover {
 @media (max-width: 720px) {
   .filter-grid,
   .filter-grid--compact,
+  .filter-grid--toolbar,
   .metrics-grid {
     grid-template-columns: 1fr;
+  }
+
+  .field--wide {
+    grid-column: auto;
   }
 }

@@ -20,7 +20,8 @@ import { runHogQL, sqlLiteral } from "@/lib/posthog";
 type NumericRow = Record<string, number | string | null>;
 
 function percent(value: number) {
-  return `${value.toFixed(1)}%`;
+  const digits = value === 0 ? 1 : value < 1 ? 2 : 1;
+  return `${value.toFixed(digits)}%`;
 }
 
 function compactNumber(value: number) {
@@ -135,9 +136,13 @@ function productScope(product: ProductKey) {
   if (product === "upscale") {
     return ` AND (
       ${lowerLike("toString(properties.free_property)", "upscale")}
+      OR ${lowerLike("toString(properties.free_property)", "upscalemedia")}
       OR ${lowerLike("toString(properties.$current_url)", "upscale")}
+      OR ${lowerLike("toString(properties.$current_url)", "upscalemedia")}
       OR ${lowerLike("toString(properties.page)", "upscale")}
+      OR ${lowerLike("toString(properties.page)", "upscalemedia")}
       OR ${lowerLike("toString(properties.tool_id)", "upscale")}
+      OR ${lowerLike("toString(properties.tool_id)", "upscalemedia")}
     )`;
   }
 
@@ -166,12 +171,22 @@ function paymentPopupCondition(product: ProductKey, alias?: string) {
 
 function errorMessageExpression() {
   return `coalesce(
+    nullIf(toString(properties.error), ''),
     nullIf(toString(properties.error_message), ''),
     nullIf(toString(properties.errorMessage), ''),
     nullIf(toString(properties.reason), ''),
     nullIf(toString(properties.message), ''),
     nullIf(toString(properties.failure_reason), ''),
     'Unknown'
+  )`;
+}
+
+function errorDetailExpression() {
+  return `coalesce(
+    nullIf(toString(properties.error_details), ''),
+    nullIf(toString(properties.details), ''),
+    nullIf(toString(properties.detail), ''),
+    ''
   )`;
 }
 
@@ -217,17 +232,7 @@ function failureFilter() {
 }
 
 function revenueExpression() {
-  const fields = [
-    "toFloatOrZero(toString(properties.revenue))",
-    "toFloatOrZero(toString(properties.amount))",
-    "toFloatOrZero(toString(properties.total))",
-    "toFloatOrZero(toString(properties.unit_price))",
-    "toFloatOrZero(toString(properties.price))",
-    "toFloatOrZero(toString(properties.grand_total))",
-    "0",
-  ];
-
-  return fields.reduce((accumulator, current) => `greatest(${accumulator}, ${current})`);
+  return "toFloatOrZero(toString(properties.paddle_unit_price)) / 100";
 }
 
 function planExpression() {
@@ -255,6 +260,220 @@ function addQuery(queries: InsightQuery[], key: string, label: string, descripti
 
 function mapRowsBy<T extends NumericRow>(rows: T[], key: keyof T) {
   return new Map(rows.map((row) => [toStringValue(row[key]), row]));
+}
+
+type ToolMapping = {
+  product: ProductKey;
+  key: string;
+  aliases: string[];
+  firstEvent: string;
+  seoUrlContains?: string;
+  consoleUrlContains: string;
+  popupEvent: "PAYMENT_POP_UP" | "LIMIT_POPUP_TRIGGRED";
+  appName?: string;
+  slug?: string;
+  freeProperty?: string;
+};
+
+const TOOL_MAPPINGS: ToolMapping[] = [
+  {
+    product: "pixelbin",
+    key: "video-generator",
+    aliases: ["video-generator", "studio/video-generator"],
+    firstEvent: "DYNAMIC_APP_VIDEO_GENERATION_CLICKED",
+    seoUrlContains: "ai-tools/video-generator",
+    consoleUrlContains: "studio/video-generator",
+    popupEvent: "PAYMENT_POP_UP",
+    appName: "video-generator",
+    slug: "video-generator",
+  },
+  {
+    product: "pixelbin",
+    key: "ai-image-generator",
+    aliases: ["ai-image-generator", "studio/ai-image-generator"],
+    firstEvent: "IMG_TO_IMG_GENERATE_CLICKED",
+    seoUrlContains: "ai-tools/ai-image-generator",
+    consoleUrlContains: "studio/ai-image-generator",
+    popupEvent: "PAYMENT_POP_UP",
+    appName: "ai-image-generator",
+    slug: "ai-image-generator",
+  },
+  {
+    product: "pixelbin",
+    key: "ai-image-editor",
+    aliases: ["ai-image-editor", "studio/ai-image-editor"],
+    firstEvent: "IMG_TO_IMG_GENERATE_CLICKED",
+    seoUrlContains: "ai-tools/ai-image-editor",
+    consoleUrlContains: "studio/ai-image-editor",
+    popupEvent: "PAYMENT_POP_UP",
+    appName: "ai-image-editor",
+    slug: "ai-image-editor",
+  },
+  {
+    product: "pixelbin",
+    key: "magic-canvas",
+    aliases: ["magic-canvas", "studio/magic-canvas"],
+    firstEvent: "IMG_TO_IMG_GENERATE_CLICKED",
+    seoUrlContains: "ai-tools/magic-canvas",
+    consoleUrlContains: "studio/magic-canvas",
+    popupEvent: "PAYMENT_POP_UP",
+    appName: "magic-canvas",
+    slug: "magic-canvas",
+  },
+  {
+    product: "watermark",
+    key: "watermarkremover",
+    aliases: ["watermarkremover", "video-watermark-remover", "mini-studio/watermarkremover"],
+    firstEvent: "IMAGE_TRANSFORMED",
+    consoleUrlContains: "mini-studio/watermarkremover",
+    popupEvent: "LIMIT_POPUP_TRIGGRED",
+    freeProperty: "watermarkremover",
+  },
+  {
+    product: "upscale",
+    key: "upscalemedia",
+    aliases: ["upscalemedia", "image-upscaler", "mini-studio/upscaler"],
+    firstEvent: "IMAGE_TRANSFORMED",
+    consoleUrlContains: "mini-studio/upscaler",
+    popupEvent: "LIMIT_POPUP_TRIGGRED",
+    freeProperty: "upscalemedia",
+  },
+];
+
+function aliasPrefix(alias?: string) {
+  return alias ? `${alias}.` : "";
+}
+
+function exactLower(expression: string, value: string) {
+  return `lower(${expression}) = ${sqlLiteral(value.toLowerCase())}`;
+}
+
+function truncateText(value: string, max = 160) {
+  return value.length > max ? `${value.slice(0, max - 3)}...` : value;
+}
+
+function parseJsonValue(value: string) {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function firstString(values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return "";
+}
+
+function simplifyErrorValue(rawValue: string) {
+  const normalized = normalizeText(rawValue);
+  if (!normalized) {
+    return "Unknown";
+  }
+
+  const parsed = parseJsonValue(normalized);
+  if (parsed && typeof parsed === "object") {
+    const candidate = firstString([
+      (parsed as { error?: unknown }).error,
+      (parsed as { message?: unknown }).message,
+      (parsed as { error_message?: unknown }).error_message,
+      (parsed as { reason?: unknown }).reason,
+    ]);
+
+    if (candidate) {
+      return truncateText(candidate, 120);
+    }
+  }
+
+  return truncateText(normalized, 120);
+}
+
+function extractErrorDetails(rawValue: string, explicitDetails: string) {
+  const normalizedDetails = normalizeText(explicitDetails);
+  if (normalizedDetails) {
+    return truncateText(normalizedDetails, 180);
+  }
+
+  const normalizedRaw = normalizeText(rawValue);
+  if (!normalizedRaw) {
+    return "";
+  }
+
+  const parsed = parseJsonValue(normalizedRaw);
+  if (parsed && typeof parsed === "object") {
+    const details = (parsed as { details?: unknown; error_details?: unknown; detail?: unknown }).details
+      ?? (parsed as { error_details?: unknown }).error_details
+      ?? (parsed as { detail?: unknown }).detail;
+
+    if (typeof details === "string" && details.trim()) {
+      return truncateText(details.trim(), 180);
+    }
+
+    if (details && typeof details === "object") {
+      return truncateText(JSON.stringify(details), 180);
+    }
+  }
+
+  return "";
+}
+
+function resolveToolMapping(product: ProductKey, value?: string | null, consoleUrl?: string | null) {
+  const candidates = [value, consoleUrl]
+    .map((item) => sanitizeFreeText(item).toLowerCase())
+    .filter(Boolean);
+
+  if (!candidates.length) {
+    return null;
+  }
+
+  return (
+    TOOL_MAPPINGS.find(
+      (mapping) =>
+        mapping.product === product &&
+        candidates.some((candidate) =>
+          mapping.aliases.some((alias) => candidate === alias || candidate.includes(alias) || alias.includes(candidate)),
+        ),
+    ) ?? null
+  );
+}
+
+function mappingScopeCondition(mapping: ToolMapping, alias?: string) {
+  const prefix = aliasPrefix(alias);
+  const conditions: string[] = [];
+
+  if (mapping.appName) {
+    conditions.push(exactLower(`toString(${prefix}properties.app_name)`, mapping.appName));
+  }
+
+  if (mapping.slug) {
+    conditions.push(exactLower(`toString(${prefix}properties.slug)`, mapping.slug));
+  }
+
+  if (mapping.freeProperty) {
+    conditions.push(exactLower(`toString(${prefix}properties.free_property)`, mapping.freeProperty));
+  }
+
+  if (mapping.consoleUrlContains) {
+    conditions.push(lowerLike(`toString(${prefix}properties.$current_url)`, mapping.consoleUrlContains));
+    conditions.push(lowerLike(`toString(${prefix}properties.$pathname)`, mapping.consoleUrlContains));
+  }
+
+  if (mapping.seoUrlContains) {
+    conditions.push(lowerLike(`toString(${prefix}properties.$current_url)`, mapping.seoUrlContains));
+    conditions.push(lowerLike(`toString(${prefix}properties.$pathname)`, mapping.seoUrlContains));
+  }
+
+  return conditions.length ? `(${conditions.join(" OR ")})` : "1 = 1";
+}
+
+function mappedPopupCondition(mapping: ToolMapping, alias?: string) {
+  const prefix = aliasPrefix(alias);
+  return `${prefix}event='${mapping.popupEvent}' AND ${mappingScopeCondition(mapping, alias)}`;
 }
 
 function withIdentifierFilter(type: IdentifierType | null | undefined, value: string | null | undefined) {
@@ -286,10 +505,62 @@ function buildSeoFunnelQuery(args: {
   stepUrl?: string | null;
 }) {
   const config = PRODUCT_CONFIGS[args.product];
+  const mapping = resolveToolMapping(args.product, args.identifierValue, args.stepUrl ?? args.mainTool);
   const identifierExpr = identifierExpression(args.identifierType);
   const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
   const scope = productScope(args.product);
   const mainToolClause = mainToolFilter(args.mainTool);
+  const paymentClause = paymentCondition(config.revenueToken);
+
+  if (mapping && args.identifierValue) {
+    const stepOneClause = `event='${mapping.firstEvent}' AND ${mappingScopeCondition(mapping)}`;
+    const stepTwoClause =
+      mapping.popupEvent === "LIMIT_POPUP_TRIGGRED"
+        ? mappedPopupCondition(mapping)
+        : `event='$pageview' AND ${mappingScopeCondition(mapping)} AND ${lowerLike("toString(properties.$current_url)", mapping.consoleUrlContains)}`;
+
+    return `
+WITH step1 AS (
+  SELECT
+    person_id AS actor_id,
+    min(timestamp) AS step1_ts
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND ${stepOneClause}
+  GROUP BY actor_id
+),
+actor_rollup AS (
+  SELECT
+    person_id AS actor_id,
+    minIf(timestamp, ${stepTwoClause}) AS step2_ts,
+    minIf(timestamp, ${paymentClause}) AS step3_ts
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND (${stepTwoClause} OR ${paymentClause})
+  GROUP BY actor_id
+)
+SELECT
+  ${sqlLiteral(mapping.key)} AS identifier_value,
+  ${sqlLiteral(mapping.firstEvent)} AS first_event,
+  uniqExact(s1.actor_id) AS step1_users,
+  uniqExactIf(
+    s1.actor_id,
+    r.step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND r.step2_ts >= s1.step1_ts
+  ) AS step2_users,
+  uniqExactIf(
+    s1.actor_id,
+    r.step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND r.step3_ts > toDateTime('1970-01-01 00:00:00')
+    AND r.step2_ts >= s1.step1_ts
+    AND r.step3_ts >= r.step2_ts
+  ) AS step3_users
+FROM step1 s1
+LEFT JOIN actor_rollup r ON r.actor_id = s1.actor_id`;
+  }
+
   const stepTwoClause =
     args.product === "watermark" || args.product === "upscale"
       ? paymentPopupCondition(args.product)
@@ -315,10 +586,11 @@ actor_rollup AS (
   SELECT
     person_id AS actor_id,
     minIf(timestamp, ${stepTwoClause}) AS step2_ts,
-    minIf(timestamp, ${paymentCondition(config.revenueToken)}) AS step3_ts
+    minIf(timestamp, ${paymentClause}) AS step3_ts
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND (${stepTwoClause} OR ${paymentClause})
   GROUP BY actor_id
 )
 SELECT
@@ -351,18 +623,24 @@ function buildConsoleQuery(args: {
   consoleUrl: string;
 }) {
   const config = PRODUCT_CONFIGS[args.product];
-  const popupCondition = paymentPopupCondition(args.product);
+  const mapping = resolveToolMapping(args.product, args.consoleUrl, args.consoleUrl);
+  const stepOneCondition = mapping
+    ? `event='$pageview' AND ${mappingScopeCondition(mapping)} AND ${lowerLike("toString(properties.$current_url)", mapping.consoleUrlContains)}`
+    : `event='$pageview' AND ${lowerLike("toString(properties.$current_url)", args.consoleUrl)}`;
+  const popupCondition = mapping ? mappedPopupCondition(mapping) : paymentPopupCondition(args.product);
+  const paymentClause = paymentCondition(config.revenueToken);
 
   return `
 WITH actor_rollup AS (
   SELECT
     person_id AS actor_id,
-    minIf(timestamp, event = '$pageview' AND ${lowerLike("toString(properties.$current_url)", args.consoleUrl)}) AS step1_ts,
+    minIf(timestamp, ${stepOneCondition}) AS step1_ts,
     minIf(timestamp, ${popupCondition}) AS step2_ts,
-    minIf(timestamp, ${paymentCondition(config.revenueToken)}) AS step3_ts
+    minIf(timestamp, ${paymentClause}) AS step3_ts
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND (${stepOneCondition} OR ${popupCondition} OR ${paymentClause})
   GROUP BY actor_id
 )
 SELECT
@@ -396,8 +674,10 @@ function buildPerformanceErrorsQuery(args: {
 
   return `
 SELECT
-  ${errorMessageExpression()} AS error_message,
+  ${errorMessageExpression()} AS raw_error,
+  ${errorDetailExpression()} AS error_details,
   any(event) AS event_name,
+  any(${modelExpression()}) AS model_id,
   count() AS error_count,
   uniqExact(person_id) AS impacted_users
 FROM events
@@ -406,7 +686,7 @@ WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
   AND ${failureFilter()}
   ${scope}
   ${identifierFilter}
-GROUP BY error_message
+GROUP BY raw_error, error_details
 ORDER BY error_count DESC
 LIMIT 40`;
 }
@@ -991,7 +1271,9 @@ async function buildPerformancePayload(request: DashboardRequest): Promise<Dashb
 
   const errorTableRows = topContributors.map((row) => ({
     event: toStringValue(row.event_name),
-    error: toStringValue(row.error_message),
+    error: simplifyErrorValue(toStringValue(row.raw_error)),
+    details: extractErrorDetails(toStringValue(row.raw_error), toStringValue(row.error_details)) || "n/a",
+    modelId: toStringValue(row.model_id) || "n/a",
     failures: toNumber(row.error_count),
     impactedUsers: toNumber(row.impacted_users),
     share: totalErrors === 0 ? "0%" : percent((toNumber(row.error_count) / totalErrors) * 100),
@@ -1019,7 +1301,9 @@ async function buildPerformancePayload(request: DashboardRequest): Promise<Dashb
         queryKey: "perf-errors",
         columns: [
           { key: "event", label: "Event" },
-          { key: "error", label: "Error message" },
+          { key: "error", label: "Error" },
+          { key: "details", label: "Error details" },
+          { key: "modelId", label: "Model" },
           { key: "failures", label: "Failures", align: "right" },
           { key: "impactedUsers", label: "Impacted users", align: "right" },
           { key: "share", label: "Error share", align: "right" },
@@ -1152,7 +1436,7 @@ async function buildRevenuePayload(request: DashboardRequest): Promise<Dashboard
   ];
 
   return {
-    title: `${config.label} revenue insights`,
+    title: request.product === "revenue" ? "Revenue insights" : `${config.label} revenue insights`,
     subtitle: config.revenueToken
       ? `Paddle revenue filtered to plans containing ${config.revenueToken}.`
       : "Cross-product revenue view using all paddle API transactions.",
