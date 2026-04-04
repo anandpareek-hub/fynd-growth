@@ -102,6 +102,18 @@ export const FAILURE_IGNORE_PATTERNS = [
   "quota",
   "no credits",
   "exhausted",
+  "content safety",
+  "responsible ai",
+  "usage guidelines",
+  "usage policy",
+  "content policy",
+  "content checker",
+  "content violation",
+  "safety violation",
+  "nsfw",
+  "blocked due to",
+  "operation cancelled",
+  "not a valid tiktok link",
 ];
 
 export const PIXELBIN_TOOL_SUGGESTIONS = [

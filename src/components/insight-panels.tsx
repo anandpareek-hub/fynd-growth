@@ -10,6 +10,11 @@ type InsightPanelsProps = {
   payload: DashboardPayload;
   onOpenQuery: (queryKey: string) => void;
   detailLinkBuilder?: (identifier: string) => string | null;
+  businessContext?: {
+    productDescription?: string;
+    icpDescription?: string;
+    successFactors?: string;
+  };
 };
 
 function QueryIcon({
@@ -69,6 +74,7 @@ export function InsightPanels({
   payload,
   onOpenQuery,
   detailLinkBuilder,
+  businessContext,
 }: InsightPanelsProps) {
   const [recommendations, setRecommendations] = useState<string[]>([]);
   const [aiError, setAiError] = useState<string>("");
@@ -87,6 +93,19 @@ export function InsightPanels({
         body: JSON.stringify({
           summaryText: payload.summaryText,
           scope: payload.title,
+          businessContext,
+          payloadSnapshot: {
+            title: payload.title,
+            subtitle: payload.subtitle,
+            cards: payload.cards,
+            callouts: payload.callouts,
+            tables: payload.tables.map((table) => ({
+              id: table.id,
+              title: table.title,
+              description: table.description,
+              rows: table.rows.slice(0, 8),
+            })),
+          },
         }),
       });
       const data = (await response.json()) as { recommendations?: string[]; error?: string };
@@ -222,7 +241,7 @@ export function InsightPanels({
               ))}
             </ul>
           ) : (
-            <div className="empty-state">No AI actions generated yet for this insight.</div>
+            <div className="empty-state">No AI actions generated yet for this insight. Add Business Context to improve the output quality.</div>
           )}
         </section>
       </div>

@@ -52,7 +52,8 @@ a {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -61,7 +62,8 @@ button {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   border-radius: 12px;
   border: 1px solid var(--border);
@@ -74,6 +76,12 @@ select {
 
 input::placeholder {
   color: var(--text-soft);
+}
+
+textarea {
+  min-height: 172px;
+  resize: vertical;
+  line-height: 1.55;
 }
 
 .app-shell {
@@ -327,6 +335,18 @@ input::placeholder {
   color: var(--text);
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .content-panel {
   min-height: 220px;
 }
@@ -499,6 +519,21 @@ tbody tr:hover {
   line-height: 1.5;
   font-size: 0.72rem;
   font-weight: 800;
+}
+
+.context-form {
+  margin-top: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.context-textarea {
+  background: var(--surface-alt);
+}
+
+.context-upload {
+  width: fit-content;
 }
 
 .recommendation-list {

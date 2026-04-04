@@ -124,6 +124,20 @@ function mainToolFilter(text?: string | null) {
 }
 
 function productScope(product: ProductKey) {
+  if (product === "pixelbin") {
+    return ` AND (
+      ${lowerLike("toString(properties.$current_url)", "/ai-tools/")}
+      OR ${lowerLike("toString(properties.$current_url)", "console.pixelbin.io")}
+      OR ${lowerLike("toString(properties.$current_url)", "/studio/")}
+      OR ${lowerLike("toString(properties.$pathname)", "/ai-tools/")}
+      OR ${lowerLike("toString(properties.$pathname)", "/studio/")}
+      OR lower(toString(properties.app_name)) IN ('video-generator', 'ai-image-generator', 'ai-image-editor', 'magic-canvas', 'ai-editor')
+      OR lower(toString(properties.page)) IN ('ai-video-generator', 'ai-image-generator', 'ai-image-editor', 'studio_ai-editor', 'batch-editor')
+      OR lower(toString(properties.free_property)) IN ('watermarkremover', 'video-watermark-remover', 'upscalemedia')
+      OR length(trim(BOTH ' ' FROM coalesce(nullIf(toString(properties.operationID), ''), nullIf(toString(properties.operationId), ''), ''))) > 0
+    )`;
+  }
+
   if (product === "watermark") {
     return ` AND (
       ${lowerLike("toString(properties.free_property)", "watermark")}
@@ -182,11 +196,20 @@ function productRevenueClause(productOrToken?: ProductKey | string | null, alias
   }
 }
 
-function paymentCondition(productOrToken?: ProductKey | string | null, alias?: string) {
+function paymentCondition(
+  productOrToken?: ProductKey | string | null,
+  alias?: string,
+  options?: {
+    apiOnly?: boolean;
+    includeProductFilter?: boolean;
+  },
+) {
   const prefix = alias ? `${alias}.` : "";
+  const apiOnly = options?.apiOnly ?? true;
+  const includeProductFilter = options?.includeProductFilter ?? true;
   return `${prefix}event='paddle_transaction'
-    AND toString(${prefix}properties.paddle_origin)='api'
-    AND toString(${prefix}properties.paddle_event_type)='transaction.completed'${productRevenueClause(productOrToken, alias)}`;
+    ${apiOnly ? `AND toString(${prefix}properties.paddle_origin)='api'` : ""}
+    AND toString(${prefix}properties.paddle_event_type)='transaction.completed'${includeProductFilter ? productRevenueClause(productOrToken, alias) : ""}`;
 }
 
 function paymentPopupCondition(product: ProductKey, alias?: string) {
@@ -248,29 +271,76 @@ function inputExpression() {
 }
 
 function failureFilter() {
+  const errorExpr = `lower(${errorMessageExpression()})`;
+  const eventExpr = "lower(event)";
   const ignore = FAILURE_IGNORE_PATTERNS.map((pattern) =>
-    `lower(${errorMessageExpression()}) NOT LIKE ${sqlLiteral(`%${pattern}%`)}`,
+    `${errorExpr} NOT LIKE ${sqlLiteral(`%${pattern}%`)}`,
   );
+  const technicalSignals = [
+    `${errorExpr} LIKE '%network%'`,
+    `${errorExpr} LIKE '%validation failed%'`,
+    `${errorExpr} LIKE '%timeout%'`,
+    `${errorExpr} LIKE '%timed out%'`,
+    `${errorExpr} LIKE '%status code%'`,
+    `${errorExpr} LIKE '%unexpected status%'`,
+    `${errorExpr} LIKE '%503%'`,
+    `${errorExpr} LIKE '%502%'`,
+    `${errorExpr} LIKE '%500%'`,
+    `${errorExpr} LIKE '%422%'`,
+    `${errorExpr} LIKE '%fetch failed%'`,
+    `${errorExpr} LIKE '%backend%'`,
+    `${errorExpr} LIKE '%server%'`,
+    `${errorExpr} LIKE '%connection%'`,
+    `${errorExpr} LIKE '%upload failed%'`,
+    `${errorExpr} LIKE '%no response%'`,
+    `${eventExpr} IN ('generation_failed', 'video_generation_failed', 'image_transformation_failed', 'dynamic_app_transformation_failed', 'dynamic_app_transformation_polling_failed', 'dynamic_app_video_failed', 'dynamic_app_file_upload_failed', 'image_upload_failed', 'video_upload_failed')`,
+  ];
 
   return `(
-    lower(event) LIKE '%failed%'
-    OR lower(event) LIKE '%error%'
-    OR lower(${errorMessageExpression()}) LIKE '%fail%'
-    OR lower(${errorMessageExpression()}) LIKE '%error%'
+    (
+      ${eventExpr} LIKE '%failed%'
+      OR ${eventExpr} LIKE '%error%'
+      OR ${errorExpr} LIKE '%fail%'
+      OR ${errorExpr} LIKE '%error%'
+    )
+    AND (${technicalSignals.join(" OR ")})
   ) AND ${ignore.join(" AND ")}`;
+}
+
+function successEventCondition(product: ProductKey, alias?: string) {
+  const prefix = alias ? `${alias}.` : "";
+
+  if (product === "watermark") {
+    return `(${prefix}event='IMAGE_TRANSFORMED' OR ${prefix}event='VIDEO_WATERMARK_REMOVED')`;
+  }
+
+  if (product === "upscale") {
+    return `${prefix}event='IMAGE_TRANSFORMED'`;
+  }
+
+  return `(
+    ${prefix}event IN ('GENERATION_COMPLETED', 'VIDEO_GENERATED', 'IMAGE_TRANSFORMED')
+    OR ${prefix}event='DYNAMIC_APP_VIDEO_GENERATED'
+    OR ${prefix}event='DYNAMIC_APP_TRANSFORMATION_POLLING_SUCCEEDED'
+  )`;
+}
+
+function revenueCategoryExpression(alias?: string) {
+  const prefix = alias ? `${alias}.` : "";
+  const paddleName = `toString(${prefix}properties.paddle_name)`;
+
+  return `CASE
+    WHEN ${lowerLike(paddleName, "PB ")} OR ${lowerLike(paddleName, "Pixelbin")} THEN 'PB'
+    WHEN ${lowerLike(paddleName, "UM ")} OR ${lowerLike(paddleName, "upscale")} THEN 'UM'
+    WHEN ${lowerLike(paddleName, "WM ")} OR ${lowerLike(paddleName, "watermark")} OR ${lowerLike(paddleName, "WatermarkRemover")} THEN 'WM'
+    WHEN ${lowerLike(paddleName, "EB ")} OR ${lowerLike(paddleName, "erase")} THEN 'EB'
+    WHEN ${lowerLike(paddleName, "Custom")} THEN 'Custom'
+    ELSE 'Other'
+  END`;
 }
 
 function revenueExpression() {
   return "toFloatOrZero(toString(properties.paddle_unit_price)) / 100";
-}
-
-function planExpression() {
-  return `coalesce(
-    nullIf(toString(properties.paddle_name), ''),
-    nullIf(toString(properties.plan_name), ''),
-    nullIf(toString(properties.plan), ''),
-    'Unknown'
-  )`;
 }
 
 function summaryText(title: string, cards: MetricCard[], callouts: Callout[], tables: { title: string; rows: TableRow[] }[]) {
@@ -352,11 +422,19 @@ const TOOL_MAPPINGS: ToolMapping[] = [
   {
     product: "watermark",
     key: "watermarkremover",
-    aliases: ["watermarkremover", "video-watermark-remover", "mini-studio/watermarkremover"],
-    firstEvent: "IMAGE_TRANSFORMED",
+    aliases: ["watermarkremover", "mini-studio/watermarkremover"],
+    firstEvent: "IMAGE_UPLOADED",
     consoleUrlContains: "mini-studio/watermarkremover",
     popupEvent: "LIMIT_POPUP_TRIGGRED",
     freeProperty: "watermarkremover",
+  },
+  {
+    product: "watermark",
+    key: "video-watermark-remover",
+    aliases: ["video-watermark-remover", "mini-studio/video-watermark-remover"],
+    firstEvent: "VIDEO_UPLOAD_ACTION",
+    consoleUrlContains: "video-watermark-remover",
+    popupEvent: "LIMIT_POPUP_TRIGGRED",
   },
   {
     product: "upscale",
@@ -539,14 +617,21 @@ function buildSeoFunnelQuery(args: {
   const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
   const scope = productScope(args.product);
   const mainToolClause = mainToolFilter(args.mainTool);
-  const paymentClause = paymentCondition(config.revenueToken);
+  const paymentClause = paymentCondition(null, undefined, {
+    apiOnly: false,
+    includeProductFilter: false,
+  });
 
   if (mapping && args.identifierValue) {
+    const mappedStepTwoUrl = sanitizeFreeText(args.stepUrl || mapping.consoleUrlContains) || mapping.consoleUrlContains;
     const stepOneClause = `event='${mapping.firstEvent}' AND ${mappingScopeCondition(mapping)}`;
     const stepTwoClause =
       mapping.popupEvent === "LIMIT_POPUP_TRIGGRED"
         ? mappedPopupCondition(mapping)
-        : `event='$pageview' AND ${mappingScopeCondition(mapping)} AND ${lowerLike("toString(properties.$current_url)", mapping.consoleUrlContains)}`;
+        : `event='$pageview' AND (
+          ${lowerLike("toString(properties.$current_url)", mappedStepTwoUrl)}
+          OR ${lowerLike("toString(properties.$pathname)", mappedStepTwoUrl)}
+        )`;
 
     return `
 WITH step1 AS (
@@ -651,13 +736,19 @@ function buildConsoleQuery(args: {
   to: string;
   consoleUrl: string;
 }) {
-  const config = PRODUCT_CONFIGS[args.product];
   const mapping = resolveToolMapping(args.product, args.consoleUrl, args.consoleUrl);
+  const mappedConsoleUrl = sanitizeFreeText(args.consoleUrl || mapping?.consoleUrlContains) || mapping?.consoleUrlContains || args.consoleUrl;
   const stepOneCondition = mapping
-    ? `event='$pageview' AND ${mappingScopeCondition(mapping)} AND ${lowerLike("toString(properties.$current_url)", mapping.consoleUrlContains)}`
+    ? `event='$pageview' AND (
+        ${lowerLike("toString(properties.$current_url)", mappedConsoleUrl)}
+        OR ${lowerLike("toString(properties.$pathname)", mappedConsoleUrl)}
+      )`
     : `event='$pageview' AND ${lowerLike("toString(properties.$current_url)", args.consoleUrl)}`;
   const popupCondition = mapping ? mappedPopupCondition(mapping) : paymentPopupCondition(args.product);
-  const paymentClause = paymentCondition(config.revenueToken);
+  const paymentClause = paymentCondition(null, undefined, {
+    apiOnly: false,
+    includeProductFilter: false,
+  });
 
   return `
 WITH actor_rollup AS (
@@ -700,13 +791,23 @@ function buildPerformanceErrorsQuery(args: {
 }) {
   const scope = productScope(args.product);
   const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
+  const identifierExpr = args.identifierType ? identifierExpression(args.identifierType) : "''";
+  const includeIdentifierDimension = Boolean(args.identifierType) && !sanitizeFreeText(args.identifierValue);
+  const identifierSelect = includeIdentifierDimension
+    ? `${identifierExpr} AS identifier_value,`
+    : `${sqlLiteral(sanitizeFreeText(args.identifierValue) || "Scoped selection")} AS identifier_value,`;
+  const identifierGroupBy = includeIdentifierDimension ? "identifier_value, " : "";
+  const identifierConstraint = includeIdentifierDimension ? `AND ${nonEmptyExpression(identifierExpr)}` : "";
 
   return `
 SELECT
+  ${identifierSelect}
   ${errorMessageExpression()} AS raw_error,
   ${errorDetailExpression()} AS error_details,
   any(event) AS event_name,
   any(${modelExpression()}) AS model_id,
+  any(coalesce(nullIf(toString(properties.operationID), ''), nullIf(toString(properties.operationId), ''), '')) AS operation_id,
+  any(coalesce(nullIf(toString(properties.app_name), ''), nullIf(toString(properties.free_property), ''), nullIf(toString(properties.page), ''), nullIf(toString(properties.slug), ''), 'n/a')) AS scope_label,
   count() AS error_count,
   uniqExact(person_id) AS impacted_users
 FROM events
@@ -715,7 +816,8 @@ WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
   AND ${failureFilter()}
   ${scope}
   ${identifierFilter}
-GROUP BY raw_error, error_details
+  ${identifierConstraint}
+GROUP BY ${identifierGroupBy}raw_error, error_details
 ORDER BY error_count DESC
 LIMIT 40`;
 }
@@ -796,6 +898,68 @@ ORDER BY sample_count DESC
 LIMIT 10`;
 }
 
+function buildPerformanceBreakdownQuery(args: {
+  product: ProductKey;
+  from: string;
+  to: string;
+  identifierType?: IdentifierType | null;
+  identifierValue?: string | null;
+}) {
+  if (!args.identifierType || sanitizeFreeText(args.identifierValue)) {
+    return "";
+  }
+
+  const scope = productScope(args.product);
+  const identifierExpr = identifierExpression(args.identifierType);
+
+  return `
+SELECT
+  ${identifierExpr} AS identifier_value,
+  count() AS failures,
+  uniqExact(person_id) AS impacted_users
+FROM events
+WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+  AND timestamp < toDateTime(${sqlLiteral(args.to)})
+  AND ${failureFilter()}
+  ${scope}
+  AND ${nonEmptyExpression(identifierExpr)}
+GROUP BY identifier_value
+ORDER BY impacted_users DESC, failures DESC
+LIMIT 12`;
+}
+
+function buildPerformanceJourneyQuery(args: {
+  product: ProductKey;
+  from: string;
+  to: string;
+  identifierType?: IdentifierType | null;
+  identifierValue?: string | null;
+}) {
+  const scope = productScope(args.product);
+  const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
+  const popupCondition = paymentPopupCondition(args.product);
+
+  return `
+WITH actor_rollup AS (
+  SELECT
+    person_id AS actor_id,
+    countIf(${failureFilter()}) AS failure_events,
+    countIf(${successEventCondition(args.product)}) AS success_events,
+    countIf(${popupCondition}) AS popup_events
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    ${scope}
+    ${identifierFilter}
+  GROUP BY actor_id
+)
+SELECT
+  uniqExactIf(actor_id, failure_events > 0 AND popup_events = 0) AS failure_before_paywall_users,
+  uniqExactIf(actor_id, success_events > 0 AND popup_events = 0) AS success_without_paywall_users,
+  uniqExactIf(actor_id, popup_events > 0) AS paywall_users
+FROM actor_rollup`;
+}
+
 function buildRevenueSummaryQuery(args: {
   product: ProductKey;
   from: string;
@@ -807,11 +971,15 @@ function buildRevenueSummaryQuery(args: {
 SELECT
   sum(${revenueExpression()}) AS total_revenue,
   count() AS total_payments,
-  uniqExact(person_id) AS buyers
+  uniqExact(person_id) AS buyers,
+  sumIf(${revenueExpression()}, toString(properties.paddle_origin)='api') AS new_revenue,
+  countIf(toString(properties.paddle_origin)='api') AS new_payments,
+  uniqExactIf(person_id, toString(properties.paddle_origin)='api') AS new_buyers
 FROM events
 WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
   AND timestamp < toDateTime(${sqlLiteral(args.to)})
-  AND ${paymentCondition(token)}`;
+  AND event='paddle_transaction'
+  AND toString(properties.paddle_event_type)='transaction.completed'${productRevenueClause(token)}`;
 }
 
 function buildRevenuePlansQuery(args: {
@@ -819,21 +987,21 @@ function buildRevenuePlansQuery(args: {
   from: string;
   to: string;
 }) {
-  const token = PRODUCT_CONFIGS[args.product].revenueToken;
-
   return `
 SELECT
-  ${planExpression()} AS plan_name,
+  ${revenueCategoryExpression()} AS plan_name,
   sum(${revenueExpression()}) AS revenue,
   count() AS payments,
   uniqExact(person_id) AS buyers
 FROM events
 WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
   AND timestamp < toDateTime(${sqlLiteral(args.to)})
-  AND ${paymentCondition(token)}
+  AND event='paddle_transaction'
+  AND toString(properties.paddle_event_type)='transaction.completed'
 GROUP BY plan_name
-ORDER BY revenue DESC
-LIMIT 12`;
+HAVING plan_name IN ('PB', 'WM', 'UM', 'EB', 'Custom')
+ORDER BY multiIf(plan_name='PB', 1, plan_name='WM', 2, plan_name='UM', 3, plan_name='EB', 4, plan_name='Custom', 5, 99) ASC
+LIMIT 5`;
 }
 
 function buildRevenueAttributionQuery(args: {
@@ -841,8 +1009,6 @@ function buildRevenueAttributionQuery(args: {
   from: string;
   to: string;
 }) {
-  const token = PRODUCT_CONFIGS[args.product].revenueToken;
-
   return `
 WITH tx AS (
   SELECT
@@ -852,7 +1018,8 @@ WITH tx AS (
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND ${paymentCondition(token)}
+    AND event='paddle_transaction'
+    AND toString(properties.paddle_event_type)='transaction.completed'
     AND ${nonEmptyExpression("toString(properties.paddle_email)")}
   GROUP BY buyer_email
 ),
@@ -883,10 +1050,10 @@ editor_usage AS (
   SELECT
     lower(toString(person.properties.email)) AS buyer_email,
     multiIf(
-      ${lowerLike("toString(properties.tool_id)", "watermark")} OR ${lowerLike("toString(properties.tool_id)", "wm")}, 'Watermark remover',
-      ${lowerLike("toString(properties.tool_id)", "upscale")} OR ${lowerLike("toString(properties.tool_id)", "sr")} OR ${lowerLike("toString(properties.tool_id)", "super")}, 'Upscale media',
-      ${lowerLike("toString(properties.tool_id)", "erase")} OR ${lowerLike("toString(properties.tool_id)", "bg")}, 'Erase background',
-      'AI Editor Studio'
+      ${lowerLike("toString(properties.tool_id)", "watermark")} OR ${lowerLike("toString(properties.tool_id)", "wm")}, 'AI Editor (Watermark)',
+      ${lowerLike("toString(properties.tool_id)", "upscale")} OR ${lowerLike("toString(properties.tool_id)", "sr")} OR ${lowerLike("toString(properties.tool_id)", "super")}, 'AI Editor (Upscale)',
+      ${lowerLike("toString(properties.tool_id)", "erase")} OR ${lowerLike("toString(properties.tool_id)", "bg")}, 'AI Editor (EraseBG)',
+      'AI Editor (Image Edit/Gen)'
     ) AS tool_bucket,
     count() AS usage_events
   FROM events
@@ -912,9 +1079,10 @@ aggregated_usage AS (
       tool_bucket = 'AI Image Generator', 600,
       tool_bucket = 'AI Image Editor', 500,
       tool_bucket = 'Magic Canvas', 400,
-      tool_bucket = 'Watermark remover', 300,
-      tool_bucket = 'Upscale media', 200,
-      tool_bucket = 'Erase background', 150,
+      tool_bucket = 'AI Editor (Watermark)', 320,
+      tool_bucket = 'AI Editor (Upscale)', 310,
+      tool_bucket = 'AI Editor (EraseBG)', 300,
+      tool_bucket = 'AI Editor (Image Edit/Gen)', 290,
       tool_bucket = 'Batch Editor', 100,
       tool_bucket = 'AI Editor Studio', 50,
       0
@@ -930,7 +1098,7 @@ primary_usage AS (
   GROUP BY buyer_email
 )
 SELECT
-  coalesce(primary_tool, 'Unattributed') AS primary_tool,
+  coalesce(primary_tool, 'No Tool Usage') AS primary_tool,
   sum(tx.revenue) AS revenue,
   sum(tx.payments) AS payments,
   count() AS buyers
@@ -938,7 +1106,7 @@ FROM tx
 LEFT JOIN primary_usage pu ON pu.buyer_email = tx.buyer_email
 GROUP BY primary_tool
 ORDER BY revenue DESC
-LIMIT 10`;
+LIMIT 12`;
 }
 
 function buildNoDiscoveryQuery(args: {
@@ -951,6 +1119,10 @@ function buildNoDiscoveryQuery(args: {
 }) {
   const config = PRODUCT_CONFIGS[args.product];
   const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
+  const stepTwoCondition =
+    args.product === "watermark" || args.product === "upscale"
+      ? paymentPopupCondition(args.product)
+      : `event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault, "")}`;
 
   return `
 WITH step1 AS (
@@ -964,36 +1136,49 @@ WITH step1 AS (
     ${productScope(args.product)}
   GROUP BY actor_id
 ),
-actor_rollup AS (
+step2 AS (
   SELECT
     person_id AS actor_id,
-    minIf(timestamp, event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault, "")}) AS step2_ts,
-    countIf(event != '$pageview') AS follow_events
+    minIf(timestamp, ${stepTwoCondition}) AS step2_ts
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
+  GROUP BY actor_id
+),
+post_step2 AS (
+  SELECT
+    e.person_id AS actor_id,
+    count() AS post_events
+  FROM events e
+  INNER JOIN step2 s2 ON s2.actor_id = e.person_id
+  WHERE e.timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND s2.step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND e.timestamp > s2.step2_ts
   GROUP BY actor_id
 )
 SELECT
   uniqExactIf(
     s.actor_id,
-    r.step2_ts > toDateTime('1970-01-01 00:00:00')
-    AND r.step2_ts >= s.step1_ts
+    s2.step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND s2.step2_ts >= s.step1_ts
   ) AS reached_step2,
   uniqExactIf(
     s.actor_id,
-    r.step2_ts > toDateTime('1970-01-01 00:00:00')
-    AND r.step2_ts >= s.step1_ts
-    AND r.follow_events = 0
+    s2.step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND s2.step2_ts >= s.step1_ts
+    AND coalesce(p.post_events, 0) = 0
   ) AS no_discovery_users
 FROM step1 s
-LEFT JOIN actor_rollup r ON r.actor_id = s.actor_id`;
+LEFT JOIN step2 s2 ON s2.actor_id = s.actor_id
+LEFT JOIN post_step2 p ON p.actor_id = s.actor_id`;
 }
 
 async function buildSeoFunnelsPayload(request: DashboardRequest): Promise<DashboardPayload> {
   const bundle = resolveComparisonBundle(request);
   const config = PRODUCT_CONFIGS[request.product];
   const identifierType = request.identifierType ?? config.funnelIdentifierTypes[0];
+  const selectedIdentifier = sanitizeFreeText(request.identifierValue);
   const queries: InsightQuery[] = [];
   const currentSql = buildSeoFunnelQuery({
     product: request.product,
@@ -1016,11 +1201,26 @@ async function buildSeoFunnelsPayload(request: DashboardRequest): Promise<Dashbo
 
   addQuery(queries, "seo-current", "Current SEO funnel query", "Person-linked funnel from first identifier touch to studio landing to paddle conversion.", currentSql);
   addQuery(queries, "seo-comparison", "Comparison SEO funnel query", "Same funnel logic for the comparison period.", compareSql);
+  const noDiscoverySql = selectedIdentifier
+    ? buildNoDiscoveryQuery({
+        product: request.product,
+        from: bundle.current.from,
+        to: bundle.current.to,
+        identifierType,
+        identifierValue: selectedIdentifier,
+        stepUrl: request.stepUrl,
+      })
+    : "";
+  if (noDiscoverySql) {
+    addQuery(queries, "seo-no-discovery", "No product discovery query", "Users who reached step 2 but generated no follow-on activity.", noDiscoverySql);
+  }
 
-  const [currentRows, comparisonRows] = await Promise.all([
+  const [currentRows, comparisonRows, noDiscoveryRows] = await Promise.all([
     runHogQL<NumericRow>(currentSql),
     runHogQL<NumericRow>(compareSql),
+    noDiscoverySql ? runHogQL<NumericRow>(noDiscoverySql) : Promise.resolve([]),
   ]);
+  const noDiscovery = noDiscoveryRows[0] ?? {};
 
   const comparisonMap = mapRowsBy(comparisonRows, "identifier_value");
   const rows = currentRows.map((row) => {
@@ -1071,6 +1271,9 @@ async function buildSeoFunnelsPayload(request: DashboardRequest): Promise<Dashbo
   const totalStep3 = displayRows.reduce((sum, row) => sum + row.step3, 0);
   const totalCompareStep1 = comparisonRows.reduce((sum, row) => sum + toNumber(row.step1_users), 0);
   const totalCompareStep3 = comparisonRows.reduce((sum, row) => sum + toNumber(row.step3_users), 0);
+  const reachedStep2 = toNumber(noDiscovery.reached_step2);
+  const noDiscoveryUsers = toNumber(noDiscovery.no_discovery_users);
+  const discoveryTone: "negative" | "neutral" = noDiscoveryUsers > 0 ? "negative" : "neutral";
 
   const cards: MetricCard[] = [
     {
@@ -1098,6 +1301,17 @@ async function buildSeoFunnelsPayload(request: DashboardRequest): Promise<Dashbo
       hint: `${formatWindowLabel(bundle.current.from, bundle.current.to)} vs ${formatWindowLabel(bundle.comparison.from, bundle.comparison.to)}`,
       queryKey: "seo-current",
     },
+    ...(selectedIdentifier
+      ? [
+          {
+            id: "seo-no-discovery",
+            label: "No product discovery",
+            value: compactNumber(noDiscoveryUsers),
+            hint: reachedStep2 ? `${percent((noDiscoveryUsers / reachedStep2) * 100)} of step 2 users` : "No step 2 users",
+            queryKey: "seo-no-discovery",
+          },
+        ]
+      : []),
   ];
 
   const callouts: Callout[] = [
@@ -1109,6 +1323,20 @@ async function buildSeoFunnelsPayload(request: DashboardRequest): Promise<Dashbo
       tone: "neutral",
       queryKey: "seo-current",
     },
+    ...(selectedIdentifier
+      ? [
+          {
+            id: "seo-discovery-gap",
+            eyebrow: "Discovery gap",
+            title: "Watch users who land on step 2 but do nothing next",
+            body: reachedStep2
+              ? `${percent((noDiscoveryUsers / reachedStep2) * 100)} of step-2 users had no follow-on activity. That usually points to weak onboarding, unclear next steps, or a missing prompt to continue after the landing page.`
+              : "No step-2 users were detected for this identifier in the current range.",
+            tone: discoveryTone,
+            queryKey: "seo-no-discovery",
+          },
+        ]
+      : []),
   ];
 
   return {
@@ -1138,7 +1366,10 @@ async function buildSeoFunnelsPayload(request: DashboardRequest): Promise<Dashbo
       },
     ],
     queries,
-    summaryText: summaryText(`${config.label} SEO funnels`, cards, callouts, [{ title: "SEO funnel rows", rows: displayRows }]),
+    summaryText: summaryText(`${config.label} SEO funnels`, cards, callouts, [
+      { title: "SEO funnel rows", rows: displayRows },
+      ...(selectedIdentifier ? [{ title: "No discovery check", rows: [{ reachedStep2, noDiscoveryUsers }] }] : []),
+    ]),
   };
 }
 
@@ -1280,25 +1511,49 @@ async function buildPerformancePayload(request: DashboardRequest): Promise<Dashb
     identifierType: request.identifierType,
     identifierValue: request.identifierValue,
   });
+  const breakdownSql = buildPerformanceBreakdownQuery({
+    product: request.product,
+    from: bundle.current.from,
+    to: bundle.current.to,
+    identifierType: request.identifierType,
+    identifierValue: request.identifierValue,
+  });
+  const journeySql = buildPerformanceJourneyQuery({
+    product: request.product,
+    from: bundle.current.from,
+    to: bundle.current.to,
+    identifierType: request.identifierType,
+    identifierValue: request.identifierValue,
+  });
 
-  addQuery(queries, "perf-errors", "Failure breakdown query", "Top actionable error messages after filtering out credit and rate-limit noise.", errorsSql);
+  addQuery(queries, "perf-errors", "Failure breakdown query", "Top technical error messages after filtering out content-policy and credit noise.", errorsSql);
   addQuery(queries, "perf-rollup", "Performance rollup query", "Impacted users and paywall drop after first actionable failure.", rollupSql);
   addQuery(queries, "perf-rollup-compare", "Comparison performance rollup query", "Same performance rollup for the previous comparison period.", rollupCompareSql);
   addQuery(queries, "perf-context", "Failure context query", "Pulls sample model, prompt, and input payload context to help debugging.", contextSql);
+  if (breakdownSql) {
+    addQuery(queries, "perf-breakdown", "Identifier breakdown query", "Breaks technical failures down by the selected identifier dimension.", breakdownSql);
+  }
+  addQuery(queries, "perf-journey", "Journey risk query", "Measures level-1 failures, successful outputs without paywall, and paywall exposure across the selected scope.", journeySql);
 
-  const [errorRows, rollupRows, comparisonRows, contextRows] = await Promise.all([
+  const [errorRows, rollupRows, comparisonRows, contextRows, breakdownRows, journeyRows] = await Promise.all([
     runHogQL<NumericRow>(errorsSql),
     runHogQL<NumericRow>(rollupSql),
     runHogQL<NumericRow>(rollupCompareSql),
     runHogQL<NumericRow>(contextSql),
+    breakdownSql ? runHogQL<NumericRow>(breakdownSql) : Promise.resolve([]),
+    runHogQL<NumericRow>(journeySql),
   ]);
   const rollup = rollupRows[0] ?? {};
   const compare = comparisonRows[0] ?? {};
+  const journey = journeyRows[0] ?? {};
 
   const totalUsers = toNumber(rollup.total_users);
   const impactedUsers = toNumber(rollup.impacted_users);
   const droppedBeforePaywall = toNumber(rollup.dropped_before_paywall);
   const compareImpacted = toNumber(compare.impacted_users);
+  const failureBeforePaywallUsers = toNumber(journey.failure_before_paywall_users);
+  const successWithoutPaywallUsers = toNumber(journey.success_without_paywall_users);
+  const paywallUsers = toNumber(journey.paywall_users);
 
   const totalErrors = errorRows.reduce((sum, row) => sum + toNumber(row.error_count), 0);
   let running = 0;
@@ -1321,7 +1576,7 @@ async function buildPerformancePayload(request: DashboardRequest): Promise<Dashb
       id: "perf-errors",
       label: "Actionable failure events",
       value: compactNumber(totalErrors),
-      hint: "Credit and rate-limit noise excluded",
+      hint: "Technical issues only. Content-policy noise excluded.",
       queryKey: "perf-errors",
     },
     {
@@ -1331,8 +1586,17 @@ async function buildPerformancePayload(request: DashboardRequest): Promise<Dashb
       hint: impactedUsers ? `${percent((droppedBeforePaywall / impactedUsers) * 100)} of impacted users` : "No impacted users",
       queryKey: "perf-rollup",
     },
+    {
+      id: "perf-success-no-paywall",
+      label: "Successful output, no paywall",
+      value: compactNumber(successWithoutPaywallUsers),
+      hint: totalUsers ? `${percent((successWithoutPaywallUsers / totalUsers) * 100)} of scoped users` : "No scoped users",
+      queryKey: "perf-journey",
+    },
   ];
 
+  const primaryBreakdown = breakdownRows[0];
+  const identifierLabel = request.identifierType ? IDENTIFIER_LABELS[request.identifierType] : "Identifier";
   const callouts: Callout[] = [
     {
       id: "perf-rootcause",
@@ -1344,10 +1608,38 @@ async function buildPerformancePayload(request: DashboardRequest): Promise<Dashb
       tone: "neutral",
       queryKey: "perf-errors",
     },
+    {
+      id: "perf-journey",
+      eyebrow: "Journey leak",
+      title: "Separate product quality issues from pricing exposure issues",
+      body:
+        successWithoutPaywallUsers > failureBeforePaywallUsers
+          ? `More users are completing a core action without ever seeing the paywall than failing technically before it. That usually means output quality, post-success prompts, or monetization timing should be reviewed alongside error fixes.`
+          : `Technical failures before the paywall are the larger leak right now. Prioritize the top error buckets first, then inspect whether the paywall timing still makes sense after those fixes land.`,
+      tone: "neutral",
+      queryKey: "perf-journey",
+    },
+    ...(primaryBreakdown
+      ? [
+          {
+            id: "perf-scope-hotspot",
+            eyebrow: `${identifierLabel} hotspot`,
+            title: `${toStringValue(primaryBreakdown.identifier_value) || "Top scoped segment"} needs the first pass`,
+            body: `${compactNumber(toNumber(primaryBreakdown.impacted_users))} impacted users and ${compactNumber(toNumber(primaryBreakdown.failures))} technical failures make this the highest-priority ${identifierLabel.toLowerCase()} slice in the current range.`,
+            tone: "neutral" as const,
+            queryKey: breakdownSql ? "perf-breakdown" : "perf-errors",
+          },
+        ]
+      : []),
   ];
 
   const errorTableRows = topContributors.map((row) => ({
+    identifier: toStringValue(row.identifier_value) || "Scoped selection",
     event: toStringValue(row.event_name),
+    operationId:
+      request.identifierType === "operationID" && !sanitizeFreeText(request.identifierValue)
+        ? toStringValue(row.scope_label) || "n/a"
+        : toStringValue(row.operation_id) || toStringValue(row.scope_label) || "n/a",
     error: simplifyErrorValue(toStringValue(row.raw_error)),
     details: extractErrorDetails(toStringValue(row.raw_error), toStringValue(row.error_details)) || "n/a",
     modelId: toStringValue(row.model_id) || "n/a",
@@ -1363,6 +1655,43 @@ async function buildPerformancePayload(request: DashboardRequest): Promise<Dashb
     input: toStringValue(row.input_sample).slice(0, 120) || "n/a",
     samples: toNumber(row.sample_count),
   }));
+  const breakdownTableRows = breakdownRows.map((row) => ({
+    identifier: toStringValue(row.identifier_value),
+    impactedUsers: toNumber(row.impacted_users),
+    failures: toNumber(row.failures),
+  }));
+  const journeyTableRows = [
+    {
+      metric: "Level 1 technical failures before paywall",
+      users: failureBeforePaywallUsers,
+      share: impactedUsers ? percent((failureBeforePaywallUsers / impactedUsers) * 100) : "0%",
+      note: "Users who hit a technical failure and never reached a paywall event.",
+    },
+    {
+      metric: "Successful output without paywall",
+      users: successWithoutPaywallUsers,
+      share: totalUsers ? percent((successWithoutPaywallUsers / totalUsers) * 100) : "0%",
+      note: "Users who saw a successful outcome but never saw a paywall event.",
+    },
+    {
+      metric: "Users exposed to paywall",
+      users: paywallUsers,
+      share: totalUsers ? percent((paywallUsers / totalUsers) * 100) : "0%",
+      note: "Users who encountered the paywall event in the current period.",
+    },
+  ];
+  const showIdentifierColumn = Boolean(request.identifierType) && !sanitizeFreeText(request.identifierValue);
+  const errorColumns = [
+    ...(showIdentifierColumn ? [{ key: "identifier", label: identifierLabel }] : []),
+    { key: "event", label: "Event" },
+    { key: "operationId", label: request.identifierType === "operationID" ? "Operation / tool" : "Tool context" },
+    { key: "error", label: "Error" },
+    { key: "details", label: "Error details" },
+    { key: "modelId", label: "Model" },
+    { key: "failures", label: "Failures", align: "right" as const },
+    { key: "impactedUsers", label: "Impacted users", align: "right" as const },
+    { key: "share", label: "Error share", align: "right" as const },
+  ];
 
   return {
     title: `${config.label} product performance`,
@@ -1373,20 +1702,43 @@ async function buildPerformancePayload(request: DashboardRequest): Promise<Dashb
     tables: [
       {
         id: "perf-error-table",
-        title: "Top actionable error messages",
+        title: request.identifierType === "operationID" && !request.identifierValue
+          ? "Top actionable technical errors by Operation ID"
+          : "Top actionable technical errors",
         description: "Rows shown until they cover roughly 80% of filtered failures.",
         queryKey: "perf-errors",
-        columns: [
-          { key: "event", label: "Event" },
-          { key: "error", label: "Error" },
-          { key: "details", label: "Error details" },
-          { key: "modelId", label: "Model" },
-          { key: "failures", label: "Failures", align: "right" },
-          { key: "impactedUsers", label: "Impacted users", align: "right" },
-          { key: "share", label: "Error share", align: "right" },
-        ],
+        columns: errorColumns,
         rows: errorTableRows,
         emptyState: "No actionable failure messages matched the current scope.",
+      },
+      ...(breakdownTableRows.length
+        ? [
+            {
+              id: "perf-breakdown-table",
+              title: `${identifierLabel} breakdown`,
+              description: "Highest-impact slices ranked by unique users hit by technical failures.",
+              queryKey: breakdownSql ? "perf-breakdown" : "perf-errors",
+              columns: [
+                { key: "identifier", label: identifierLabel },
+                { key: "impactedUsers", label: "Impacted users", align: "right" as const },
+                { key: "failures", label: "Failures", align: "right" as const },
+              ],
+              rows: breakdownTableRows,
+            },
+          ]
+        : []),
+      {
+        id: "perf-journey-table",
+        title: "Product performance level checks",
+        description: "Counts the biggest user-journey leaks the team can act on immediately.",
+        queryKey: "perf-journey",
+        columns: [
+          { key: "metric", label: "Metric" },
+          { key: "users", label: "Users", align: "right" as const },
+          { key: "share", label: "Share", align: "right" as const },
+          { key: "note", label: "Why it matters" },
+        ],
+        rows: journeyTableRows,
       },
       {
         id: "perf-context-table",
@@ -1408,6 +1760,8 @@ async function buildPerformancePayload(request: DashboardRequest): Promise<Dashb
     queries,
     summaryText: summaryText(`${config.label} product performance`, cards, callouts, [
       { title: "Top actionable errors", rows: errorTableRows },
+      { title: "Journey checks", rows: journeyTableRows },
+      { title: `${identifierLabel} breakdown`, rows: breakdownTableRows },
       { title: "Context rows", rows: contextTableRows },
     ]),
   };
@@ -1439,10 +1793,10 @@ async function buildRevenuePayload(request: DashboardRequest): Promise<Dashboard
     to: bundle.current.to,
   });
 
-  addQuery(queries, "rev-summary", "Revenue summary query", "Total revenue, payments, and buyers from paddle_transaction API events.", summarySql);
-  addQuery(queries, "rev-summary-compare", "Comparison revenue summary query", "Same revenue rollup for the comparison period.", compareSql);
-  addQuery(queries, "rev-plans", "Revenue by plan query", "Plan-level revenue mix based on paddle names.", plansSql);
-  addQuery(queries, "rev-attribution", "Revenue attribution query", "Attributes buyer revenue to their dominant tool usage within the period.", attributionSql);
+  addQuery(queries, "rev-summary", "Revenue summary query", "Total revenue from all completed paddle transactions plus API-origin new revenue.", summarySql);
+  addQuery(queries, "rev-summary-compare", "Comparison revenue summary query", "Same total-vs-new revenue rollup for the comparison period.", compareSql);
+  addQuery(queries, "rev-plans", "Revenue by product category query", "PB, WM, UM, EB, and Custom category mix based on paddle names.", plansSql);
+  addQuery(queries, "rev-attribution", "Revenue by tool query", "Attributes buyer revenue to their dominant tool usage within the period.", attributionSql);
 
   const [summaryRows, compareRows, planRows, attributionRows] = await Promise.all([
     runHogQL<NumericRow>(summarySql),
@@ -1456,8 +1810,12 @@ async function buildRevenuePayload(request: DashboardRequest): Promise<Dashboard
   const totalRevenue = toNumber(summary.total_revenue);
   const totalPayments = toNumber(summary.total_payments);
   const buyers = toNumber(summary.buyers);
+  const newRevenue = toNumber(summary.new_revenue);
+  const newPayments = toNumber(summary.new_payments);
+  const newBuyers = toNumber(summary.new_buyers);
   const compareRevenue = toNumber(comparison.total_revenue);
   const comparePayments = toNumber(comparison.total_payments);
+  const compareNewRevenue = toNumber(comparison.new_revenue);
 
   const cards: MetricCard[] = [
     {
@@ -1470,36 +1828,65 @@ async function buildRevenuePayload(request: DashboardRequest): Promise<Dashboard
       queryKey: "rev-summary",
     },
     {
+      id: "rev-new",
+      label: "New revenue",
+      value: currency(newRevenue),
+      delta: deltaLabel(newRevenue, compareNewRevenue),
+      deltaTone: deltaTone(newRevenue, compareNewRevenue),
+      hint: "API-origin completed transactions",
+      queryKey: "rev-summary",
+    },
+    {
       id: "rev-payments",
       label: "Payments",
       value: compactNumber(totalPayments),
       delta: deltaLabel(totalPayments, comparePayments),
       deltaTone: deltaTone(totalPayments, comparePayments),
-      hint: buyers ? `${buyers} buyers` : "No buyers",
+      hint: buyers ? `${buyers} buyers total` : "No buyers",
       queryKey: "rev-summary",
     },
     {
       id: "rev-aov",
       label: "Revenue per payment",
       value: currency(totalPayments === 0 ? 0 : totalRevenue / totalPayments),
-      hint: "Based only on paddle API transactions",
+      hint: newPayments ? `${compactNumber(newPayments)} API payments · ${newBuyers} API buyers` : "No API-origin purchases",
       queryKey: "rev-summary",
     },
   ];
 
-  const planRowsMapped = planRows.map((row) => ({
-    plan: toStringValue(row.plan_name),
-    revenue: currency(toNumber(row.revenue)),
-    payments: toNumber(row.payments),
-    buyers: toNumber(row.buyers),
-  }));
+  const planMap = new Map(planRows.map((row) => [toStringValue(row.plan_name), row]));
+  const planRowsMapped = ["PB", "WM", "UM", "EB", "Custom"].map((category) => {
+    const row = planMap.get(category);
+    return {
+      plan: category,
+      revenue: currency(toNumber(row?.revenue)),
+      payments: toNumber(row?.payments),
+      buyers: toNumber(row?.buyers),
+    };
+  });
   const attributionMapped = attributionRows.map((row) => ({
     tool: toStringValue(row.primary_tool),
+    revenueValue: toNumber(row.revenue),
     revenue: currency(toNumber(row.revenue)),
     payments: toNumber(row.payments),
     buyers: toNumber(row.buyers),
     contribution: totalRevenue === 0 ? "0%" : percent((toNumber(row.revenue) / totalRevenue) * 100),
   }));
+  const attributionTotal = attributionMapped.reduce((sum, row) => sum + row.revenueValue, 0);
+  const attributionDisplayRows = [
+    ...attributionMapped.map((row) => {
+      const { revenueValue, ...displayRow } = row;
+      void revenueValue;
+      return displayRow;
+    }),
+    {
+      tool: "TOTAL",
+      revenue: currency(attributionTotal),
+      payments: "",
+      buyers: "",
+      contribution: "100%",
+    },
+  ];
 
   const callouts: Callout[] = [
     {
@@ -1515,16 +1902,16 @@ async function buildRevenuePayload(request: DashboardRequest): Promise<Dashboard
   return {
     title: request.product === "revenue" ? "Revenue insights" : `${config.label} revenue insights`,
     subtitle: config.revenueToken
-      ? `Paddle revenue filtered to plans containing ${config.revenueToken}.`
-      : "Cross-product revenue view using all paddle API transactions.",
+      ? `Summary cards are filtered to ${config.revenueToken} plan revenue. Category and tool tables benchmark the broader revenue mix.`
+      : "Cross-product revenue view using completed paddle transactions, with API-origin revenue tracked separately as new revenue.",
     cards,
     tables: [
       {
         id: "rev-plan-table",
-        title: "Revenue by plan",
+        title: "Revenue by product category",
         queryKey: "rev-plans",
         columns: [
-          { key: "plan", label: "Plan" },
+          { key: "plan", label: "Category" },
           { key: "revenue", label: "Revenue", align: "right" },
           { key: "payments", label: "Payments", align: "right" },
           { key: "buyers", label: "Buyers", align: "right" },
@@ -1533,17 +1920,15 @@ async function buildRevenuePayload(request: DashboardRequest): Promise<Dashboard
       },
       {
         id: "rev-attribution-table",
-        title: "Primary tool attribution",
-        description: "Buyer revenue grouped by their dominant in-period usage.",
+        title: "Revenue by tool",
+        description: "Buyer revenue attributed to the dominant tool used in-period, following the email + tool-usage cross-reference logic.",
         queryKey: "rev-attribution",
         columns: [
           { key: "tool", label: "Tool" },
-          { key: "revenue", label: "Revenue", align: "right" },
-          { key: "payments", label: "Payments", align: "right" },
-          { key: "buyers", label: "Buyers", align: "right" },
-          { key: "contribution", label: "Revenue share", align: "right" },
+          { key: "revenue", label: "Est Revenue", align: "right" },
+          { key: "contribution", label: "% Rev", align: "right" },
         ],
-        rows: attributionMapped,
+        rows: attributionDisplayRows,
       },
     ],
     callouts,
