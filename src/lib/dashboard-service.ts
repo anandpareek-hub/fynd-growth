@@ -424,6 +424,7 @@ const TOOL_MAPPINGS: ToolMapping[] = [
     key: "watermarkremover",
     aliases: ["watermarkremover", "mini-studio/watermarkremover"],
     firstEvent: "IMAGE_UPLOADED",
+    seoUrlContains: "watermarkremover.io",
     consoleUrlContains: "mini-studio/watermarkremover",
     popupEvent: "LIMIT_POPUP_TRIGGRED",
     freeProperty: "watermarkremover",
@@ -433,6 +434,7 @@ const TOOL_MAPPINGS: ToolMapping[] = [
     key: "video-watermark-remover",
     aliases: ["video-watermark-remover", "mini-studio/video-watermark-remover"],
     firstEvent: "VIDEO_UPLOAD_ACTION",
+    seoUrlContains: "video-watermark-remover",
     consoleUrlContains: "video-watermark-remover",
     popupEvent: "LIMIT_POPUP_TRIGGRED",
   },
@@ -441,6 +443,7 @@ const TOOL_MAPPINGS: ToolMapping[] = [
     key: "upscalemedia",
     aliases: ["upscalemedia", "image-upscaler", "mini-studio/upscaler"],
     firstEvent: "IMAGE_TRANSFORMED",
+    seoUrlContains: "upscale.media",
     consoleUrlContains: "mini-studio/upscaler",
     popupEvent: "LIMIT_POPUP_TRIGGRED",
     freeProperty: "upscalemedia",
@@ -578,6 +581,31 @@ function mappingScopeCondition(mapping: ToolMapping, alias?: string) {
   return conditions.length ? `(${conditions.join(" OR ")})` : "1 = 1";
 }
 
+function mappingSeoEntryCondition(mapping: ToolMapping, alias?: string) {
+  const prefix = aliasPrefix(alias);
+  const conditions: string[] = [];
+
+  if (mapping.seoUrlContains) {
+    conditions.push(lowerLike(`toString(${prefix}properties.$current_url)`, mapping.seoUrlContains));
+    conditions.push(lowerLike(`toString(${prefix}properties.$pathname)`, mapping.seoUrlContains));
+  }
+
+  if (mapping.freeProperty) {
+    conditions.push(exactLower(`toString(${prefix}properties.free_property)`, mapping.freeProperty));
+  }
+
+  if (mapping.slug) {
+    conditions.push(exactLower(`toString(${prefix}properties.slug)`, mapping.slug));
+  }
+
+  if (!conditions.length) {
+    conditions.push(lowerLike(`toString(${prefix}properties.$current_url)`, mapping.key));
+    conditions.push(lowerLike(`toString(${prefix}properties.$pathname)`, mapping.key));
+  }
+
+  return `(${conditions.join(" OR ")})`;
+}
+
 function mappedPopupCondition(mapping: ToolMapping, alias?: string) {
   const prefix = aliasPrefix(alias);
   return `${prefix}event='${mapping.popupEvent}' AND ${mappingScopeCondition(mapping, alias)}`;
@@ -599,7 +627,11 @@ function withIdentifierFilter(type: IdentifierType | null | undefined, value: st
 function withStepUrl(stepUrl: string | null | undefined, fallback: string, alias = "e") {
   const normalized = sanitizeFreeText(stepUrl || fallback);
   const prefix = alias ? `${alias}.` : "";
-  return lowerLike(`toString(${prefix}properties.$current_url)`, normalized);
+  return `(
+    ${lowerLike(`toString(${prefix}properties.$current_url)`, normalized)}
+    OR ${lowerLike(`toString(${prefix}properties.$pathname)`, normalized)}
+    OR ${lowerLike(`toString(${prefix}properties.page)`, normalized)}
+  )`;
 }
 
 function buildSeoFunnelQuery(args: {
@@ -624,7 +656,7 @@ function buildSeoFunnelQuery(args: {
 
   if (mapping && args.identifierValue) {
     const mappedStepTwoUrl = sanitizeFreeText(args.stepUrl || mapping.consoleUrlContains) || mapping.consoleUrlContains;
-    const stepOneClause = `event='${mapping.firstEvent}' AND ${mappingScopeCondition(mapping)}`;
+    const stepOneClause = `event='${mapping.firstEvent}' AND ${mappingSeoEntryCondition(mapping)}`;
     const stepTwoClause =
       mapping.popupEvent === "LIMIT_POPUP_TRIGGRED"
         ? mappedPopupCondition(mapping)
@@ -1020,6 +1052,7 @@ WITH tx AS (
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     AND event='paddle_transaction'
     AND toString(properties.paddle_event_type)='transaction.completed'
+    ${productRevenueClause("PB")}
     AND ${nonEmptyExpression("toString(properties.paddle_email)")}
   GROUP BY buyer_email
 ),
@@ -1098,7 +1131,7 @@ primary_usage AS (
   GROUP BY buyer_email
 )
 SELECT
-  coalesce(primary_tool, 'No Tool Usage') AS primary_tool,
+  coalesce(nullIf(primary_tool, ''), 'No Tool Usage') AS primary_tool,
   sum(tx.revenue) AS revenue,
   sum(tx.payments) AS payments,
   count() AS buyers
@@ -1115,14 +1148,77 @@ function buildNoDiscoveryQuery(args: {
   to: string;
   identifierType: IdentifierType;
   identifierValue: string;
+  mainTool?: string | null;
   stepUrl?: string | null;
 }) {
   const config = PRODUCT_CONFIGS[args.product];
   const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
+  const mapping = resolveToolMapping(args.product, args.identifierValue, args.stepUrl ?? args.mainTool);
   const stepTwoCondition =
     args.product === "watermark" || args.product === "upscale"
       ? paymentPopupCondition(args.product)
       : `event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault, "")}`;
+
+  if (mapping) {
+    const mappedStepTwoCondition =
+      mapping.popupEvent === "LIMIT_POPUP_TRIGGRED"
+        ? mappedPopupCondition(mapping)
+        : `event='$pageview' AND (
+            ${lowerLike("toString(properties.$current_url)", sanitizeFreeText(args.stepUrl || mapping.consoleUrlContains) || mapping.consoleUrlContains)}
+            OR ${lowerLike("toString(properties.$pathname)", sanitizeFreeText(args.stepUrl || mapping.consoleUrlContains) || mapping.consoleUrlContains)}
+          )`;
+
+    return `
+WITH step1 AS (
+  SELECT
+    person_id AS actor_id,
+    min(timestamp) AS step1_ts
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND event='${mapping.firstEvent}'
+    AND ${mappingSeoEntryCondition(mapping)}
+  GROUP BY actor_id
+),
+step2 AS (
+  SELECT
+    person_id AS actor_id,
+    minIf(timestamp, ${mappedStepTwoCondition}) AS step2_ts
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+  GROUP BY actor_id
+),
+post_step2 AS (
+  SELECT
+    e.person_id AS actor_id,
+    countIf(
+      e.event NOT IN ('$pageview', '$autocapture', '$identify', '$set')
+      AND e.timestamp > s2.step2_ts
+    ) AS post_events
+  FROM events e
+  INNER JOIN step2 s2 ON s2.actor_id = e.person_id
+  WHERE e.timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND s2.step2_ts > toDateTime('1970-01-01 00:00:00')
+  GROUP BY actor_id
+)
+SELECT
+  uniqExactIf(
+    s.actor_id,
+    s2.step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND s2.step2_ts >= s.step1_ts
+  ) AS reached_step2,
+  uniqExactIf(
+    s.actor_id,
+    s2.step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND s2.step2_ts >= s.step1_ts
+    AND coalesce(p.post_events, 0) = 0
+  ) AS no_discovery_users
+FROM step1 s
+LEFT JOIN step2 s2 ON s2.actor_id = s.actor_id
+LEFT JOIN post_step2 p ON p.actor_id = s.actor_id`;
+  }
 
   return `
 WITH step1 AS (
@@ -1174,6 +1270,277 @@ LEFT JOIN step2 s2 ON s2.actor_id = s.actor_id
 LEFT JOIN post_step2 p ON p.actor_id = s.actor_id`;
 }
 
+function buildFunnelStageInsightsQuery(args: {
+  product: ProductKey;
+  from: string;
+  to: string;
+  identifierType: IdentifierType;
+  identifierValue: string;
+  mainTool?: string | null;
+  stepUrl?: string | null;
+}) {
+  const config = PRODUCT_CONFIGS[args.product];
+  const mapping = resolveToolMapping(args.product, args.identifierValue, args.stepUrl ?? args.mainTool);
+  const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
+  const paymentClause = paymentCondition(null, undefined, {
+    apiOnly: false,
+    includeProductFilter: false,
+  });
+  const epoch = "toDateTime('1970-01-01 00:00:00')";
+
+  const stepTwoClause =
+    args.product === "watermark" || args.product === "upscale"
+      ? mapping
+        ? mappedPopupCondition(mapping)
+        : paymentPopupCondition(args.product)
+      : mapping
+        ? `event='$pageview' AND (
+            ${lowerLike("toString(properties.$current_url)", sanitizeFreeText(args.stepUrl || mapping.consoleUrlContains) || mapping.consoleUrlContains)}
+            OR ${lowerLike("toString(properties.$pathname)", sanitizeFreeText(args.stepUrl || mapping.consoleUrlContains) || mapping.consoleUrlContains)}
+          )`
+        : `event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault, "")}`;
+
+  const popupClause = mapping ? mappedPopupCondition(mapping) : paymentPopupCondition(args.product);
+  const failureClauseEvent = mapping ? `(${failureFilter()}) AND ${mappingScopeCondition(mapping, "e")}` : failureFilter();
+  const successClauseEvent = mapping
+    ? `(${successEventCondition(args.product, "e")}) AND ${mappingScopeCondition(mapping, "e")}`
+    : successEventCondition(args.product, "e");
+
+  const step1Cte = mapping
+    ? `
+step1 AS (
+  SELECT
+    person_id AS actor_id,
+    min(timestamp) AS step1_ts
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND event='${mapping.firstEvent}'
+    AND ${mappingSeoEntryCondition(mapping)}
+  GROUP BY actor_id
+)`
+    : `
+step1 AS (
+  SELECT
+    person_id AS actor_id,
+    min(timestamp) AS step1_ts
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    ${identifierFilter}
+    ${productScope(args.product)}
+    ${mainToolFilter(args.mainTool)}
+  GROUP BY actor_id
+)`;
+
+  return `
+WITH ${step1Cte},
+actor_rollup AS (
+  SELECT
+    person_id AS actor_id,
+    minIf(timestamp, ${stepTwoClause}) AS step2_ts,
+    minIf(timestamp, ${popupClause}) AS popup_ts,
+    minIf(timestamp, event='CHECKOUT_INITIATED') AS checkout_ts,
+    minIf(timestamp, ${paymentClause}) AS step3_ts
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND (${stepTwoClause} OR ${popupClause} OR event='CHECKOUT_INITIATED' OR ${paymentClause})
+  GROUP BY actor_id
+),
+actor_metrics AS (
+  SELECT
+    s1.actor_id AS actor_id,
+    s1.step1_ts AS step1_ts,
+    r.step2_ts AS step2_ts,
+    r.popup_ts AS popup_ts,
+    r.checkout_ts AS checkout_ts,
+    r.step3_ts AS step3_ts,
+    countIf(
+      e.timestamp >= s1.step1_ts
+      AND e.timestamp < if(r.step2_ts > ${epoch}, r.step2_ts, toDateTime(${sqlLiteral(args.to)}))
+      AND ${failureClauseEvent}
+    ) AS pre_step2_failures,
+    countIf(
+      r.step2_ts > ${epoch}
+      AND e.timestamp >= r.step2_ts
+      AND ${failureClauseEvent}
+    ) AS post_step2_failures,
+    countIf(
+      r.step2_ts > ${epoch}
+      AND e.timestamp >= r.step2_ts
+      AND ${successClauseEvent}
+    ) AS post_step2_successes
+  FROM step1 s1
+  LEFT JOIN actor_rollup r ON r.actor_id = s1.actor_id
+  LEFT JOIN events e ON e.person_id = s1.actor_id
+    AND e.timestamp >= s1.step1_ts
+    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
+  GROUP BY s1.actor_id, s1.step1_ts, r.step2_ts, r.popup_ts, r.checkout_ts, r.step3_ts
+)
+SELECT
+  uniqExact(actor_id) AS step1_users,
+  uniqExactIf(actor_id, pre_step2_failures > 0) AS step1_failure_users,
+  uniqExactIf(actor_id, popup_ts > ${epoch}) AS step1_popup_users,
+  uniqExactIf(actor_id, checkout_ts > ${epoch}) AS step1_checkout_users,
+  uniqExactIf(actor_id, step2_ts > ${epoch}) AS step2_users,
+  uniqExactIf(actor_id, step2_ts > ${epoch} AND popup_ts > ${epoch} AND popup_ts >= step2_ts) AS step2_popup_users,
+  uniqExactIf(actor_id, step2_ts > ${epoch} AND post_step2_failures > 0) AS step2_failure_users,
+  uniqExactIf(actor_id, step2_ts > ${epoch} AND post_step2_successes > 0) AS step2_success_users,
+  uniqExactIf(actor_id, step2_ts > ${epoch} AND checkout_ts > ${epoch} AND checkout_ts >= step2_ts) AS step2_checkout_users,
+  uniqExactIf(actor_id, step2_ts > ${epoch} AND step3_ts > ${epoch} AND step3_ts >= step2_ts) AS step2_paid_users,
+  uniqExactIf(actor_id, step3_ts > ${epoch}) AS step3_users
+FROM actor_metrics`;
+}
+
+function buildFunnelStageEventMixQuery(args: {
+  product: ProductKey;
+  from: string;
+  to: string;
+  identifierType: IdentifierType;
+  identifierValue: string;
+  mainTool?: string | null;
+  stepUrl?: string | null;
+}) {
+  const config = PRODUCT_CONFIGS[args.product];
+  const mapping = resolveToolMapping(args.product, args.identifierValue, args.stepUrl ?? args.mainTool);
+  const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
+  const paymentClause = paymentCondition(null, undefined, {
+    apiOnly: false,
+    includeProductFilter: false,
+  });
+  const epoch = "toDateTime('1970-01-01 00:00:00')";
+
+  const stepTwoClause =
+    args.product === "watermark" || args.product === "upscale"
+      ? mapping
+        ? mappedPopupCondition(mapping)
+        : paymentPopupCondition(args.product)
+      : mapping
+        ? `event='$pageview' AND (
+            ${lowerLike("toString(properties.$current_url)", sanitizeFreeText(args.stepUrl || mapping.consoleUrlContains) || mapping.consoleUrlContains)}
+            OR ${lowerLike("toString(properties.$pathname)", sanitizeFreeText(args.stepUrl || mapping.consoleUrlContains) || mapping.consoleUrlContains)}
+          )`
+        : `event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault, "")}`;
+
+  const popupClause = mapping ? mappedPopupCondition(mapping) : paymentPopupCondition(args.product);
+  const excludedEvents = [
+    "$pageview",
+    "$autocapture",
+    "$identify",
+    "$set",
+    "$rageclick",
+    "GOOGLE_ONE_TAP_SHOWN",
+    "GOOGLE_ONE_TAP_SKIPPED",
+    "GOOGLE_ONE_TAP_NOT_DISPLAYED",
+    "GOOGLE_ONE_TAP_DISMISSED",
+  ]
+    .map((eventName) => sqlLiteral(eventName))
+    .join(", ");
+  const focusedEvents = [
+    mapping?.firstEvent,
+    "CHECKOUT_INITIATED",
+    "USER_SIGN_UP_SUCCESS",
+    "PAYMENT_POP_UP",
+    "LIMIT_POPUP_TRIGGRED",
+    "PRICING_POPUP",
+    "UPGRADE_BUTTON_CLICK",
+    "PAYMENT_POP_UP_DISMISSED",
+    "CREDITS_LIMIT_POPUP_OPENED",
+  ]
+    .filter(Boolean)
+    .map((eventName) => sqlLiteral(eventName as string))
+    .join(", ");
+
+  const step1Cte = mapping
+    ? `
+step1 AS (
+  SELECT
+    person_id AS actor_id,
+    min(timestamp) AS step1_ts
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND event='${mapping.firstEvent}'
+    AND ${mappingSeoEntryCondition(mapping)}
+  GROUP BY actor_id
+)`
+    : `
+step1 AS (
+  SELECT
+    person_id AS actor_id,
+    min(timestamp) AS step1_ts
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    ${identifierFilter}
+    ${productScope(args.product)}
+    ${mainToolFilter(args.mainTool)}
+  GROUP BY actor_id
+)`;
+
+  return `
+WITH ${step1Cte},
+actor_rollup AS (
+  SELECT
+    person_id AS actor_id,
+    minIf(timestamp, ${stepTwoClause}) AS step2_ts,
+    minIf(timestamp, ${popupClause}) AS popup_ts,
+    minIf(timestamp, event='CHECKOUT_INITIATED') AS checkout_ts,
+    minIf(timestamp, ${paymentClause}) AS step3_ts
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND (${stepTwoClause} OR ${popupClause} OR event='CHECKOUT_INITIATED' OR ${paymentClause})
+  GROUP BY actor_id
+),
+base AS (
+  SELECT
+    multiIf(
+      r.step2_ts > ${epoch}
+      AND (r.checkout_ts > ${epoch} OR r.popup_ts > ${epoch})
+      AND e.timestamp >= if(r.checkout_ts > ${epoch}, r.checkout_ts, if(r.popup_ts > ${epoch}, r.popup_ts, r.step2_ts)),
+      'Step 3 - checkout',
+      r.step2_ts > ${epoch}
+      AND e.timestamp >= r.step2_ts,
+      'Step 2 - main tool',
+      'Step 1 - pre-landing'
+    ) AS stage,
+    e.event AS event_name,
+    count() AS event_count,
+    uniqExact(e.person_id) AS users
+  FROM events e
+  INNER JOIN step1 s1 ON s1.actor_id = e.person_id
+  LEFT JOIN actor_rollup r ON r.actor_id = e.person_id
+  WHERE e.timestamp >= s1.step1_ts
+    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND e.event NOT IN (${excludedEvents})
+    AND (
+      e.event IN (${focusedEvents})
+      OR ${failureFilter()}
+      OR ${successEventCondition(args.product, "e")}
+    )
+  GROUP BY stage, event_name
+),
+ranked AS (
+  SELECT
+    stage,
+    event_name,
+    event_count,
+    users,
+    row_number() OVER (PARTITION BY stage ORDER BY users DESC, event_count DESC) AS row_num
+  FROM base
+)
+SELECT
+  stage,
+  event_name,
+  event_count,
+  users
+FROM ranked
+WHERE row_num <= 5
+ORDER BY stage ASC, row_num ASC`;
+}
+
 async function buildSeoFunnelsPayload(request: DashboardRequest): Promise<DashboardPayload> {
   const bundle = resolveComparisonBundle(request);
   const config = PRODUCT_CONFIGS[request.product];
@@ -1199,8 +1566,8 @@ async function buildSeoFunnelsPayload(request: DashboardRequest): Promise<Dashbo
     stepUrl: request.stepUrl,
   });
 
-  addQuery(queries, "seo-current", "Current SEO funnel query", "Person-linked funnel from first identifier touch to studio landing to paddle conversion.", currentSql);
-  addQuery(queries, "seo-comparison", "Comparison SEO funnel query", "Same funnel logic for the comparison period.", compareSql);
+  addQuery(queries, "seo-current", "Current SEO funnel query", "Person-linked funnel from first identifier touch to the main-tool landing step and then paddle conversion.", currentSql);
+  addQuery(queries, "seo-comparison", "Comparison SEO funnel query", "Same main-tool funnel logic for the comparison period.", compareSql);
   const noDiscoverySql = selectedIdentifier
     ? buildNoDiscoveryQuery({
         product: request.product,
@@ -1208,6 +1575,7 @@ async function buildSeoFunnelsPayload(request: DashboardRequest): Promise<Dashbo
         to: bundle.current.to,
         identifierType,
         identifierValue: selectedIdentifier,
+        mainTool: request.mainTool,
         stepUrl: request.stepUrl,
       })
     : "";
@@ -1341,7 +1709,7 @@ async function buildSeoFunnelsPayload(request: DashboardRequest): Promise<Dashbo
 
   return {
     title: `${config.label} SEO funnels`,
-    subtitle: `First identifier touch -> ${config.stepTwoDefault === "studio" ? "studio landing" : "limit popup"} -> paddle transaction.`,
+    subtitle: `First identifier touch -> ${config.stepTwoDefault === "studio" ? "main-tool landing" : "limit popup"} -> paddle transaction.`,
     cards,
     callouts,
     tables: [
@@ -1921,7 +2289,7 @@ async function buildRevenuePayload(request: DashboardRequest): Promise<Dashboard
       {
         id: "rev-attribution-table",
         title: "Revenue by tool",
-        description: "Buyer revenue attributed to the dominant tool used in-period, following the email + tool-usage cross-reference logic.",
+        description: "Buyer revenue attributed to the dominant tool used in-period. % Rev uses PB revenue only as the denominator.",
         queryKey: "rev-attribution",
         columns: [
           { key: "tool", label: "Tool" },
@@ -1953,16 +2321,86 @@ async function buildFunnelDetailPayload(request: DashboardRequest): Promise<Dash
     to: bundle.current.to,
     identifierType,
     identifierValue,
+    mainTool: request.mainTool,
+    stepUrl: request.stepUrl,
+  });
+  const stageInsightsSql = buildFunnelStageInsightsQuery({
+    product: request.product,
+    from: bundle.current.from,
+    to: bundle.current.to,
+    identifierType,
+    identifierValue,
+    mainTool: request.mainTool,
+    stepUrl: request.stepUrl,
+  });
+  const stageEventsSql = buildFunnelStageEventMixQuery({
+    product: request.product,
+    from: bundle.current.from,
+    to: bundle.current.to,
+    identifierType,
+    identifierValue,
+    mainTool: request.mainTool,
     stepUrl: request.stepUrl,
   });
   addQuery(queries, "detail-no-discovery", "No discovery query", "Users who hit step 2 but produced no follow-on activity.", noDiscoverySql);
+  addQuery(queries, "detail-stage-insights", "Step-level funnel insights query", "Stage-level failure, paywall, checkout, and payment diagnostics for the selected funnel.", stageInsightsSql);
+  addQuery(queries, "detail-stage-events", "Top stage events query", "Top non-noise events seen across step 1, step 2, and checkout cohorts.", stageEventsSql);
 
-  const noDiscoveryRows = await runHogQL<NumericRow>(noDiscoverySql);
+  const [noDiscoveryResult, stageInsightResult, stageEventResult] = await Promise.allSettled([
+    runHogQL<NumericRow>(noDiscoverySql),
+    runHogQL<NumericRow>(stageInsightsSql),
+    runHogQL<NumericRow>(stageEventsSql),
+  ]);
+  const noDiscoveryRows = noDiscoveryResult.status === "fulfilled" ? noDiscoveryResult.value : [];
+  const stageInsightRows = stageInsightResult.status === "fulfilled" ? stageInsightResult.value : [];
+  const stageEventRows = stageEventResult.status === "fulfilled" ? stageEventResult.value : [];
   const noDiscovery = noDiscoveryRows[0] ?? {};
+  const stageInsight = stageInsightRows[0] ?? {};
   const reachedStep2 = toNumber(noDiscovery.reached_step2);
   const noDiscoveryUsers = toNumber(noDiscovery.no_discovery_users);
+  const step1Users = toNumber(stageInsight.step1_users);
+  const step1FailureUsers = toNumber(stageInsight.step1_failure_users);
+  const step1PopupUsers = toNumber(stageInsight.step1_popup_users);
+  const step1CheckoutUsers = toNumber(stageInsight.step1_checkout_users);
+  const step2Users = toNumber(stageInsight.step2_users);
+  const step2PopupUsers = toNumber(stageInsight.step2_popup_users);
+  const step2FailureUsers = toNumber(stageInsight.step2_failure_users);
+  const step2SuccessUsers = toNumber(stageInsight.step2_success_users);
+  const step2CheckoutUsers = toNumber(stageInsight.step2_checkout_users);
+  const step2PaidUsers = toNumber(stageInsight.step2_paid_users);
+  const step3Users = toNumber(stageInsight.step3_users);
 
   const detailCallouts: Callout[] = [
+    {
+      id: "detail-step1",
+      eyebrow: "Step 1 signal",
+      title: "Measure technical leakage before users even reach the main tool",
+      body: step1Users
+        ? `${percent((step1FailureUsers / step1Users) * 100)} of first-touch users hit a technical failure before step 2. ${percent((step1PopupUsers / step1Users) * 100)} saw a paywall or limit popup, and ${percent((step1CheckoutUsers / step1Users) * 100)} initiated checkout in the same window.`
+        : "No step-1 users were returned for this identifier in the selected period.",
+      tone: step1FailureUsers > 0 ? "negative" : "neutral",
+      queryKey: "detail-stage-insights",
+    },
+    {
+      id: "detail-step2",
+      eyebrow: "Step 2 signal",
+      title: "Focus on the main-tool experience after users land there",
+      body: step2Users
+        ? `${percent((step2SuccessUsers / step2Users) * 100)} of step-2 users produced a successful outcome, ${percent((step2CheckoutUsers / step2Users) * 100)} initiated checkout, and ${percent((step2FailureUsers / step2Users) * 100)} hit a technical failure after landing in the tool.`
+        : "No users reached step 2, so the main-tool engagement layer could not be measured.",
+      tone: step2FailureUsers > step2SuccessUsers ? "negative" : "neutral",
+      queryKey: "detail-stage-insights",
+    },
+    {
+      id: "detail-step3",
+      eyebrow: "Step 3 signal",
+      title: "Checkout readiness should rise faster than raw traffic",
+      body: step2Users
+        ? `${percent((step2PaidUsers / step2Users) * 100)} of step-2 users completed payment. Use this with the checkout initiation rate to see whether the leak is pre-paywall discovery or post-paywall conversion.`
+        : "No step-2 users were detected, so checkout readiness could not be measured.",
+      tone: step3Users > 0 ? "neutral" : "negative",
+      queryKey: "detail-stage-insights",
+    },
     {
       id: "detail-positive",
       eyebrow: "Why it moved",
@@ -1983,6 +2421,40 @@ async function buildFunnelDetailPayload(request: DashboardRequest): Promise<Dash
     },
   ];
 
+  const stageTableRows = [
+    {
+      stage: "Step 1 - first touch",
+      users: step1Users,
+      failureRate: step1Users ? percent((step1FailureUsers / step1Users) * 100) : "0%",
+      popupRate: step1Users ? percent((step1PopupUsers / step1Users) * 100) : "0%",
+      checkoutRate: step1Users ? percent((step1CheckoutUsers / step1Users) * 100) : "0%",
+      paidRate: step1Users ? percent((step3Users / step1Users) * 100) : "0%",
+    },
+    {
+      stage: "Step 2 - main tool",
+      users: step2Users,
+      failureRate: step2Users ? percent((step2FailureUsers / step2Users) * 100) : "0%",
+      popupRate: step2Users ? percent((step2PopupUsers / step2Users) * 100) : "0%",
+      checkoutRate: step2Users ? percent((step2CheckoutUsers / step2Users) * 100) : "0%",
+      paidRate: step2Users ? percent((step2PaidUsers / step2Users) * 100) : "0%",
+    },
+    {
+      stage: "Step 3 - paid users",
+      users: step3Users,
+      failureRate: step3Users ? percent((step2FailureUsers / step3Users) * 100) : "0%",
+      popupRate: step3Users ? percent((step1PopupUsers / step3Users) * 100) : "0%",
+      checkoutRate: step3Users ? percent((step2CheckoutUsers / step3Users) * 100) : "0%",
+      paidRate: "100%",
+    },
+  ];
+
+  const stageEventTableRows = stageEventRows.map((row) => ({
+    stage: toStringValue(row.stage),
+    event: toStringValue(row.event_name),
+    users: toNumber(row.users),
+    events: toNumber(row.event_count),
+  }));
+
   const cards = [
     ...basePayload.cards,
     {
@@ -1992,16 +2464,72 @@ async function buildFunnelDetailPayload(request: DashboardRequest): Promise<Dash
       hint: reachedStep2 ? `${percent((noDiscoveryUsers / reachedStep2) * 100)} of step 2 users` : "No step 2 users",
       queryKey: "detail-no-discovery",
     },
+    {
+      id: "detail-step1-failure",
+      label: "Step 1 failure rate",
+      value: step1Users ? percent((step1FailureUsers / step1Users) * 100) : "0%",
+      hint: "Technical failures before users reached step 2",
+      queryKey: "detail-stage-insights",
+    },
+    {
+      id: "detail-step2-success",
+      label: "Step 2 success rate",
+      value: step2Users ? percent((step2SuccessUsers / step2Users) * 100) : "0%",
+      hint: "Users who reached step 2 and produced a successful outcome",
+      queryKey: "detail-stage-insights",
+    },
+    {
+      id: "detail-checkout-rate",
+      label: "Step 2 checkout rate",
+      value: step2Users ? percent((step2CheckoutUsers / step2Users) * 100) : "0%",
+      hint: "Users who reached step 2 and initiated checkout",
+      queryKey: "detail-stage-insights",
+    },
   ];
 
   return {
     title: `${PRODUCT_CONFIGS[request.product].label} funnel detail`,
     subtitle: `${IDENTIFIER_LABELS[identifierType]} = ${identifierValue}`,
     cards,
-    tables: basePayload.tables,
+    tables: [
+      ...basePayload.tables,
+      {
+        id: "detail-stage-summary",
+        title: "Step-level diagnostics",
+        description: "Each step shows how much technical friction, paywall exposure, and checkout intent exists inside the selected funnel.",
+        queryKey: "detail-stage-insights",
+        columns: [
+          { key: "stage", label: "Stage" },
+          { key: "users", label: "Users", align: "right" },
+          { key: "failureRate", label: "Failure %", align: "right" },
+          { key: "popupRate", label: "Paywall / popup %", align: "right" },
+          { key: "checkoutRate", label: "Checkout initiated %", align: "right" },
+          { key: "paidRate", label: "Paid %", align: "right" },
+        ],
+        rows: stageTableRows,
+      },
+      {
+        id: "detail-stage-events",
+        title: "Top events by funnel stage",
+        description: "Useful for spotting whether users are uploading, failing, seeing pricing prompts, or initiating checkout at each stage.",
+        queryKey: "detail-stage-events",
+        columns: [
+          { key: "stage", label: "Stage" },
+          { key: "event", label: "Event" },
+          { key: "users", label: "Users", align: "right" },
+          { key: "events", label: "Event count", align: "right" },
+        ],
+        rows: stageEventTableRows,
+        emptyState: "No follow-on event mix was returned for the selected funnel.",
+      },
+    ],
     callouts: [...basePayload.callouts, ...detailCallouts],
     queries,
-    summaryText: summaryText(`${PRODUCT_CONFIGS[request.product].label} funnel detail`, cards, detailCallouts, basePayload.tables.map((table) => ({ title: table.title, rows: table.rows }))),
+    summaryText: summaryText(`${PRODUCT_CONFIGS[request.product].label} funnel detail`, cards, detailCallouts, [
+      ...basePayload.tables.map((table) => ({ title: table.title, rows: table.rows })),
+      { title: "Step diagnostics", rows: stageTableRows },
+      { title: "Stage event mix", rows: stageEventTableRows },
+    ]),
   };
 }
 

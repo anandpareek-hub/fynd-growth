@@ -27,6 +27,7 @@ export default async function FunnelDetailPage({ params, searchParams }: PagePro
     <FunnelDetail
       product={product}
       preset={(firstValue(resolvedSearchParams.preset) as DatePreset) ?? "7d"}
+      comparePreset={(firstValue(resolvedSearchParams.comparePreset) as DatePreset) ?? "7d"}
       identifierType={(firstValue(resolvedSearchParams.identifierType) as IdentifierType) ?? PRODUCT_CONFIGS[product].funnelIdentifierTypes[0]}
       identifierValue={firstValue(resolvedSearchParams.identifierValue) ?? ""}
       from={firstValue(resolvedSearchParams.from)}

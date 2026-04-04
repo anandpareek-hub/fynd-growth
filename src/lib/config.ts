@@ -1,6 +1,12 @@
 import { BarChart3, DollarSign, ImageUpscale, Sparkles, WandSparkles } from "lucide-react";
 
-import type { IdentifierType, ProductKey, ViewKey } from "@/lib/dashboard-types";
+import type {
+  ChartBreakdownProperty,
+  CustomScope,
+  IdentifierType,
+  ProductKey,
+  ViewKey,
+} from "@/lib/dashboard-types";
 
 export type ProductConfig = {
   key: ProductKey;
@@ -28,7 +34,7 @@ export const PRODUCT_CONFIGS: Record<ProductKey, ProductConfig> = {
     icon: Sparkles,
     revenueToken: "PB",
     defaultConsoleUrl: "studio/ai-image-generator",
-    funnelIdentifierTypes: ["slug", "appslug", "plugin", "operationID", "app_name", "page"],
+    funnelIdentifierTypes: ["slug", "appslug", "plugin", "operationID", "page"],
     performanceIdentifierTypes: ["slug", "appslug", "plugin", "operationID", "app_name", "page"],
     views: ["seo-funnels", "console-funnels", "product-performance", "revenue-insights"],
     stepTwoDefault: "studio",
@@ -129,3 +135,24 @@ export const FREE_PROPERTY_SUGGESTIONS = [
   "upscalemedia",
   "image-upscaler",
 ];
+
+export const CUSTOM_SCOPE_LABELS: Record<CustomScope, string> = {
+  funnel: "Funnel",
+  "product-performance": "Product Performance",
+  revenue: "Revenue",
+  checkout: "Checkout",
+  errors: "Errors",
+  acquisition: "Acquisition",
+  retention: "Retention",
+};
+
+export const CHART_BREAKDOWN_LABELS: Record<ChartBreakdownProperty, string> = {
+  none: "No breakdown",
+  appslug: "App slug",
+  current_url: "Current URL",
+  app_name: "App name",
+  page: "Page",
+  slug: "Slug",
+  operationID: "Operation ID",
+  free_property: "Free property",
+};

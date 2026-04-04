@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 const PRODUCT_KEYS = Object.keys(PRODUCT_CONFIGS) as ProductKey[];
 const VIEW_KEYS: ViewKey[] = ["seo-funnels", "console-funnels", "product-performance", "revenue-insights", "funnel-detail"];
-const PRESETS: DatePreset[] = ["24h", "7d", "30d", "custom"];
+const PRESETS: DatePreset[] = ["24h", "7d", "30d", "90d", "180d", "thisMonth", "lastMonth", "custom"];
 
 function pickProduct(value: string | null): ProductKey {
   return PRODUCT_KEYS.includes(value as ProductKey) ? (value as ProductKey) : "pixelbin";

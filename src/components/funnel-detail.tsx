@@ -11,6 +11,7 @@ import { InsightPanels, QueryModal } from "@/components/insight-panels";
 type FunnelDetailProps = {
   product: ProductKey;
   preset: DatePreset;
+  comparePreset: DatePreset;
   identifierType: IdentifierType;
   identifierValue: string;
   from?: string;
@@ -31,6 +32,7 @@ function buildUrl(props: FunnelDetailProps) {
     product: props.product,
     view: "funnel-detail",
     preset: props.preset,
+    comparePreset: props.comparePreset,
     identifierType: props.identifierType,
     identifierValue: props.identifierValue,
   });

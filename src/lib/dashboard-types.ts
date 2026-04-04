@@ -7,7 +7,30 @@ export type ViewKey =
   | "revenue-insights"
   | "funnel-detail";
 
-export type DatePreset = "24h" | "7d" | "30d" | "custom";
+export type DatePreset = "24h" | "7d" | "30d" | "90d" | "180d" | "thisMonth" | "lastMonth" | "custom";
+
+export type CustomScope =
+  | "funnel"
+  | "product-performance"
+  | "revenue"
+  | "checkout"
+  | "errors"
+  | "acquisition"
+  | "retention";
+
+export type ChartType = "line" | "cumulative-line" | "bar";
+
+export type ChartFrequency = "daily" | "weekly" | "monthly";
+
+export type ChartBreakdownProperty =
+  | "none"
+  | "appslug"
+  | "current_url"
+  | "app_name"
+  | "page"
+  | "slug"
+  | "operationID"
+  | "free_property";
 
 export type IdentifierType =
   | "slug"
@@ -101,4 +124,55 @@ export type TimeWindow = {
 export type ComparisonBundle = {
   current: TimeWindow;
   comparison: TimeWindow;
+};
+
+export type KnowledgeBase = {
+  product: ProductKey;
+  generatedAt: string;
+  model: string;
+  summary: string;
+  queryNotes: string[];
+  recentEvents: string[];
+  recentApps: string[];
+  recentSlugs: string[];
+  recentPages: string[];
+  recentFreeProperties: string[];
+  recentOperationIds: string[];
+  recentUrls: string[];
+};
+
+export type ChartSeriesPoint = {
+  label: string;
+  value: number;
+};
+
+export type ChartSeries = {
+  name: string;
+  points: ChartSeriesPoint[];
+  total: number;
+};
+
+export type ChartPayload = {
+  title: string;
+  subtitle: string;
+  chartType: ChartType;
+  frequency: ChartFrequency;
+  labels: string[];
+  series: ChartSeries[];
+  summary: string;
+  query: InsightQuery;
+};
+
+export type SavedChart = {
+  id: string;
+  name: string;
+  product: ProductKey;
+  events: string[];
+  breakdownProperty: ChartBreakdownProperty;
+  chartType: ChartType;
+  preset: DatePreset;
+  frequency: ChartFrequency;
+  from?: string;
+  to?: string;
+  createdAt: string;
 };

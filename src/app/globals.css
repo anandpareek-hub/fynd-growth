@@ -185,6 +185,13 @@ textarea {
   margin-bottom: 1rem;
 }
 
+.page-header--with-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
 .page-header h1 {
   font-size: 1.6rem;
   line-height: 1;
@@ -196,6 +203,13 @@ textarea {
   margin-top: 0.45rem;
   color: var(--text-muted);
   font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.page-header__meta {
+  margin-top: 0.4rem;
+  color: var(--brand);
+  font-size: 0.68rem;
   font-weight: 800;
 }
 
@@ -536,6 +550,116 @@ tbody tr:hover {
   width: fit-content;
 }
 
+.chart-event-picker {
+  margin-top: 0.9rem;
+}
+
+.chart-event-grid {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.chip-button {
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 0.46rem 0.7rem;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.chip-button--active {
+  color: var(--text);
+  background: rgba(47, 102, 243, 0.12);
+  border-color: rgba(47, 102, 243, 0.25);
+}
+
+.chart-card {
+  margin-top: 0.9rem;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  padding: 0.9rem;
+}
+
+.chart-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.chart-axis-label {
+  fill: var(--text-soft);
+  font-family: var(--font-plex-mono), monospace;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.chart-legend {
+  margin-top: 0.9rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.chart-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border-radius: 999px;
+  padding: 0.36rem 0.55rem;
+  background: white;
+  border: 1px solid var(--border);
+  font-size: 0.66rem;
+  font-weight: 800;
+}
+
+.chart-legend__swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.saved-chart-list {
+  margin-top: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.saved-chart-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-alt);
+  padding: 0.72rem 0.78rem;
+}
+
+.saved-chart-row__title {
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.saved-chart-row__meta {
+  margin-top: 0.24rem;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 800;
+}
+
+.saved-chart-row__actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
 .recommendation-list {
   margin-top: 1rem;
   list-style: none;
@@ -709,5 +833,11 @@ tbody tr:hover {
 
   .field--wide {
     grid-column: auto;
+  }
+
+  .page-header--with-actions,
+  .saved-chart-row {
+    flex-direction: column;
+    align-items: stretch;
   }
 }
