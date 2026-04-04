@@ -46,6 +46,10 @@ function sanitizeFreeText(value: string | null | undefined) {
   return normalizeText(value).slice(0, 120);
 }
 
+function nonEmptyExpression(expression: string) {
+  return `length(trim(BOTH ' ' FROM ${expression})) > 0`;
+}
+
 function deltaLabel(current: number, comparison: number) {
   const delta = calculateDelta(current, comparison);
   const sign = delta > 0 ? "+" : "";
@@ -140,22 +144,24 @@ function productScope(product: ProductKey) {
   return "";
 }
 
-function paymentCondition(token?: string | null) {
+function paymentCondition(token?: string | null, alias?: string) {
+  const prefix = alias ? `${alias}.` : "";
   const tokenClause = token
-    ? ` AND ${lowerLike("toString(properties.paddle_name)", token)}`
+    ? ` AND ${lowerLike(`toString(${prefix}properties.paddle_name)`, token)}`
     : "";
 
-  return `event='paddle_transaction'
-    AND toString(properties.paddle_origin)='api'
-    AND toString(properties.paddle_event_type)='transaction.completed'${tokenClause}`;
+  return `${prefix}event='paddle_transaction'
+    AND toString(${prefix}properties.paddle_origin)='api'
+    AND toString(${prefix}properties.paddle_event_type)='transaction.completed'${tokenClause}`;
 }
 
-function paymentPopupCondition(product: ProductKey) {
+function paymentPopupCondition(product: ProductKey, alias?: string) {
+  const prefix = alias ? `${alias}.` : "";
   if (product === "watermark" || product === "upscale") {
-    return "event='LIMIT_POPUP_TRIGGRED'";
+    return `${prefix}event='LIMIT_POPUP_TRIGGRED'`;
   }
 
-  return "event='PAYMENT_POP_UP'";
+  return `${prefix}event='PAYMENT_POP_UP'`;
 }
 
 function errorMessageExpression() {
@@ -211,15 +217,17 @@ function failureFilter() {
 }
 
 function revenueExpression() {
-  return `greatest(
-    toFloat64OrZero(toString(properties.revenue)),
-    toFloat64OrZero(toString(properties.amount)),
-    toFloat64OrZero(toString(properties.total)),
-    toFloat64OrZero(toString(properties.unit_price)),
-    toFloat64OrZero(toString(properties.price)),
-    toFloat64OrZero(toString(properties.grand_total)),
-    0
-  )`;
+  const fields = [
+    "toFloatOrZero(toString(properties.revenue))",
+    "toFloatOrZero(toString(properties.amount))",
+    "toFloatOrZero(toString(properties.total))",
+    "toFloatOrZero(toString(properties.unit_price))",
+    "toFloatOrZero(toString(properties.price))",
+    "toFloatOrZero(toString(properties.grand_total))",
+    "0",
+  ];
+
+  return fields.reduce((accumulator, current) => `greatest(${accumulator}, ${current})`);
 }
 
 function planExpression() {
@@ -262,9 +270,10 @@ function withIdentifierFilter(type: IdentifierType | null | undefined, value: st
   return ` AND lower(${identifierExpression(type)}) = ${sqlLiteral(normalized.toLowerCase())}`;
 }
 
-function withStepUrl(stepUrl: string | null | undefined, fallback: string) {
+function withStepUrl(stepUrl: string | null | undefined, fallback: string, alias = "e") {
   const normalized = sanitizeFreeText(stepUrl || fallback);
-  return lowerLike("toString(e.properties.$current_url)", normalized);
+  const prefix = alias ? `${alias}.` : "";
+  return lowerLike(`toString(${prefix}properties.$current_url)`, normalized);
 }
 
 function buildSeoFunnelQuery(args: {
@@ -283,59 +292,54 @@ function buildSeoFunnelQuery(args: {
   const mainToolClause = mainToolFilter(args.mainTool);
   const stepTwoClause =
     args.product === "watermark" || args.product === "upscale"
-      ? "e.event='LIMIT_POPUP_TRIGGRED'"
-      : `e.event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault)}`;
+      ? paymentPopupCondition(args.product)
+      : `event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault, "")}`;
 
   return `
 WITH step1 AS (
   SELECT
-    person_id,
+    person_id AS actor_id,
     ${identifierExpr} AS identifier_value,
     min(timestamp) AS step1_ts,
     argMin(event, timestamp) AS first_event
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND ${identifierExpr} != ''
+    AND ${nonEmptyExpression(identifierExpr)}
     ${identifierFilter}
     ${scope}
     ${mainToolClause}
-  GROUP BY person_id, identifier_value
+  GROUP BY actor_id, identifier_value
 ),
-step2 AS (
+actor_rollup AS (
   SELECT
-    s.person_id,
-    s.identifier_value,
-    min(e.timestamp) AS step2_ts
-  FROM step1 s
-  INNER JOIN events e ON e.person_id = s.person_id
-  WHERE e.timestamp >= s.step1_ts
-    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND ${stepTwoClause}
-  GROUP BY s.person_id, s.identifier_value
-),
-step3 AS (
-  SELECT
-    s.person_id,
-    s.identifier_value,
-    min(e.timestamp) AS step3_ts
-  FROM step2 s
-  INNER JOIN events e ON e.person_id = s.person_id
-  WHERE e.timestamp >= s.step2_ts
-    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND ${paymentCondition(config.revenueToken)}
-  GROUP BY s.person_id, s.identifier_value
+    person_id AS actor_id,
+    minIf(timestamp, ${stepTwoClause}) AS step2_ts,
+    minIf(timestamp, ${paymentCondition(config.revenueToken)}) AS step3_ts
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+  GROUP BY actor_id
 )
 SELECT
-  identifier_value,
-  any(first_event) AS first_event,
-  count() AS step1_users,
-  countIf(step2_ts IS NOT NULL) AS step2_users,
-  countIf(step3_ts IS NOT NULL) AS step3_users
-FROM step1
-LEFT JOIN step2 USING (person_id, identifier_value)
-LEFT JOIN step3 USING (person_id, identifier_value)
-GROUP BY identifier_value
+  s1.identifier_value AS identifier_value,
+  any(s1.first_event) AS first_event,
+  uniqExact(s1.actor_id) AS step1_users,
+  uniqExactIf(
+    s1.actor_id,
+    r.step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND r.step2_ts >= s1.step1_ts
+  ) AS step2_users,
+  uniqExactIf(
+    s1.actor_id,
+    r.step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND r.step3_ts > toDateTime('1970-01-01 00:00:00')
+    AND r.step2_ts >= s1.step1_ts
+    AND r.step3_ts >= r.step2_ts
+  ) AS step3_users
+FROM step1 s1
+LEFT JOIN actor_rollup r ON r.actor_id = s1.actor_id
+GROUP BY s1.identifier_value
 ORDER BY step1_users DESC
 LIMIT 25`;
 }
@@ -350,46 +354,34 @@ function buildConsoleQuery(args: {
   const popupCondition = paymentPopupCondition(args.product);
 
   return `
-WITH step1 AS (
+WITH actor_rollup AS (
   SELECT
-    person_id,
-    min(timestamp) AS step1_ts
+    person_id AS actor_id,
+    minIf(timestamp, event = '$pageview' AND ${lowerLike("toString(properties.$current_url)", args.consoleUrl)}) AS step1_ts,
+    minIf(timestamp, ${popupCondition}) AS step2_ts,
+    minIf(timestamp, ${paymentCondition(config.revenueToken)}) AS step3_ts
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND event = '$pageview'
-    AND ${lowerLike("toString(properties.$current_url)", args.consoleUrl)}
-  GROUP BY person_id
-),
-step2 AS (
-  SELECT
-    s.person_id,
-    min(e.timestamp) AS step2_ts
-  FROM step1 s
-  INNER JOIN events e ON e.person_id = s.person_id
-  WHERE e.timestamp >= s.step1_ts
-    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND ${popupCondition}
-  GROUP BY s.person_id
-),
-step3 AS (
-  SELECT
-    s.person_id,
-    min(e.timestamp) AS step3_ts
-  FROM step2 s
-  INNER JOIN events e ON e.person_id = s.person_id
-  WHERE e.timestamp >= s.step2_ts
-    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND ${paymentCondition(config.revenueToken)}
-  GROUP BY s.person_id
+  GROUP BY actor_id
 )
 SELECT
-  count() AS step1_users,
-  countIf(step2_ts IS NOT NULL) AS step2_users,
-  countIf(step3_ts IS NOT NULL) AS step3_users
-FROM step1
-LEFT JOIN step2 USING (person_id)
-LEFT JOIN step3 USING (person_id)`;
+  uniqExactIf(actor_id, step1_ts > toDateTime('1970-01-01 00:00:00')) AS step1_users,
+  uniqExactIf(
+    actor_id,
+    step1_ts > toDateTime('1970-01-01 00:00:00')
+    AND step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND step2_ts >= step1_ts
+  ) AS step2_users,
+  uniqExactIf(
+    actor_id,
+    step1_ts > toDateTime('1970-01-01 00:00:00')
+    AND step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND step3_ts > toDateTime('1970-01-01 00:00:00')
+    AND step2_ts >= step1_ts
+    AND step3_ts >= step2_ts
+  ) AS step3_users
+FROM actor_rollup`;
 }
 
 function buildPerformanceErrorsQuery(args: {
@@ -441,33 +433,30 @@ WITH scoped_users AS (
 ),
 failed_users AS (
   SELECT
-    person_id,
-    min(timestamp) AS first_failure_ts
+    person_id AS actor_id
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     AND ${failureFilter()}
     ${scope}
     ${identifierFilter}
-  GROUP BY person_id
+  GROUP BY actor_id
 ),
-post_failure_popup AS (
+popup_users AS (
   SELECT
-    f.person_id,
-    min(e.timestamp) AS popup_ts
-  FROM failed_users f
-  INNER JOIN events e ON e.person_id = f.person_id
-  WHERE e.timestamp >= f.first_failure_ts
-    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
+    person_id AS actor_id
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
     AND ${popupCondition}
-  GROUP BY f.person_id
+  GROUP BY actor_id
 )
 SELECT
   (SELECT total_users FROM scoped_users) AS total_users,
-  count() AS impacted_users,
-  countIf(popup_ts IS NULL) AS dropped_before_paywall
-FROM failed_users
-LEFT JOIN post_failure_popup USING (person_id)`;
+  uniqExact(f.actor_id) AS impacted_users,
+  uniqExactIf(f.actor_id, p.actor_id IS NULL) AS dropped_before_paywall
+FROM failed_users f
+LEFT JOIN popup_users p ON p.actor_id = f.actor_id`;
 }
 
 function buildPerformanceContextQuery(args: {
@@ -544,23 +533,22 @@ function buildRevenueAttributionQuery(args: {
   to: string;
 }) {
   const token = PRODUCT_CONFIGS[args.product].revenueToken;
-  const tokenCondition = token ? `AND ${lowerLike("toString(properties.paddle_name)", token)}` : "";
 
   return `
 WITH tx AS (
   SELECT
-    person_id,
+    person_id AS buyer_id,
     sum(${revenueExpression()}) AS revenue,
     count() AS payments
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     AND ${paymentCondition(token)}
-  GROUP BY person_id
+  GROUP BY buyer_id
 ),
 usage AS (
   SELECT
-    e.person_id,
+    e.person_id AS buyer_id,
     multiIf(
       ${lowerLike("toString(e.properties.app_name)", "video-generator")} OR ${lowerLike("toString(e.properties.$current_url)", "video-generator")}, 'Video Generator',
       ${lowerLike("toString(e.properties.app_name)", "ai-image-generator")} OR ${lowerLike("toString(e.properties.slug)", "ai-image-generator")}, 'AI Image Generator',
@@ -572,18 +560,17 @@ usage AS (
     ) AS tool_bucket,
     count() AS usage_events
   FROM events e
-  INNER JOIN tx ON tx.person_id = e.person_id
+  INNER JOIN tx ON tx.buyer_id = e.person_id
   WHERE e.timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
-    ${tokenCondition}
-  GROUP BY e.person_id, tool_bucket
+  GROUP BY buyer_id, tool_bucket
 ),
 primary_usage AS (
   SELECT
-    person_id,
+    buyer_id,
     argMax(tool_bucket, usage_events) AS primary_tool
   FROM usage
-  GROUP BY person_id
+  GROUP BY buyer_id
 )
 SELECT
   coalesce(primary_tool, 'Unattributed') AS primary_tool,
@@ -591,7 +578,7 @@ SELECT
   sum(tx.payments) AS payments,
   count() AS buyers
 FROM tx
-LEFT JOIN primary_usage USING (person_id)
+LEFT JOIN primary_usage pu ON pu.buyer_id = tx.buyer_id
 GROUP BY primary_tool
 ORDER BY revenue DESC
 LIMIT 10`;
@@ -611,42 +598,39 @@ function buildNoDiscoveryQuery(args: {
   return `
 WITH step1 AS (
   SELECT
-    person_id,
+    person_id AS actor_id,
     min(timestamp) AS step1_ts
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     ${identifierFilter}
     ${productScope(args.product)}
-  GROUP BY person_id
+  GROUP BY actor_id
 ),
-step2 AS (
+actor_rollup AS (
   SELECT
-    s.person_id,
-    min(e.timestamp) AS step2_ts
-  FROM step1 s
-  INNER JOIN events e ON e.person_id = s.person_id
-  WHERE e.timestamp >= s.step1_ts
-    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND e.event='$pageview'
-    AND ${withStepUrl(args.stepUrl, config.stepTwoDefault)}
-  GROUP BY s.person_id
-),
-follow_on AS (
-  SELECT
-    s.person_id,
-    count() AS follow_events
-  FROM step2 s
-  INNER JOIN events e ON e.person_id = s.person_id
-  WHERE e.timestamp > s.step2_ts
-    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
-  GROUP BY s.person_id
+    person_id AS actor_id,
+    minIf(timestamp, event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault, "")}) AS step2_ts,
+    countIf(event != '$pageview') AS follow_events
+  FROM events
+  WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+  GROUP BY actor_id
 )
 SELECT
-  count() AS reached_step2,
-  countIf(follow_events IS NULL) AS no_discovery_users
-FROM step2
-LEFT JOIN follow_on USING (person_id)`;
+  uniqExactIf(
+    s.actor_id,
+    r.step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND r.step2_ts >= s.step1_ts
+  ) AS reached_step2,
+  uniqExactIf(
+    s.actor_id,
+    r.step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND r.step2_ts >= s.step1_ts
+    AND r.follow_events = 0
+  ) AS no_discovery_users
+FROM step1 s
+LEFT JOIN actor_rollup r ON r.actor_id = s.actor_id`;
 }
 
 async function buildSeoFunnelsPayload(request: DashboardRequest): Promise<DashboardPayload> {

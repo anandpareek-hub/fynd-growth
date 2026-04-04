@@ -41,6 +41,11 @@ export async function runHogQL<T extends Record<string, unknown>>(query: string)
 
   if (!response.ok) {
     const body = await response.text();
+    console.error("PostHog query failed", {
+      status: response.status,
+      body,
+      query,
+    });
     throw new Error(`PostHog query failed: ${response.status} ${body}`);
   }
 

@@ -79,6 +79,7 @@ export type DashboardRequest = {
   product: ProductKey;
   view: ViewKey;
   preset?: DatePreset;
+  comparePreset?: DatePreset | null;
   from?: string | null;
   to?: string | null;
   compareFrom?: string | null;

@@ -36,6 +36,7 @@ export async function GET(request: Request) {
     product,
     view,
     preset: pickPreset(searchParams.get("preset")),
+    comparePreset: searchParams.get("comparePreset") ? pickPreset(searchParams.get("comparePreset")) : null,
     from: searchParams.get("from"),
     to: searchParams.get("to"),
     compareFrom: searchParams.get("compareFrom"),

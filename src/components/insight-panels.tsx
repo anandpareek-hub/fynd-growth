@@ -112,10 +112,6 @@ export function InsightPanels({
             <h1>{payload.title}</h1>
             <p className="hero-panel__subtitle">{payload.subtitle}</p>
           </div>
-          <button className="primary-button" type="button" onClick={generateActions} disabled={isGenerating}>
-            {isGenerating ? <Loader2 size={16} className="spin" /> : <Sparkles size={16} />}
-            {isGenerating ? "Generating actions..." : "Generate actions"}
-          </button>
         </div>
 
         <section className="metrics-grid">
@@ -203,15 +199,21 @@ export function InsightPanels({
             )}
           </section>
         ))}
-      </div>
 
-      <aside className="action-panel">
-        <div className="action-panel__card">
-          <p className="eyebrow">OpenAI action plan</p>
-          <h2>Suggested next moves</h2>
-          <p className="action-panel__copy">
-            Generate targeted actions from the current insight payload. This uses your `OPENAI_API_KEY` on the server.
-          </p>
+        <section className="action-panel__card">
+          <div className="section-header">
+            <div>
+              <p className="eyebrow">OpenAI action plan</p>
+              <h2>Suggested next moves</h2>
+              <p className="action-panel__copy">
+                Generate targeted actions from the current insight payload. This uses your `OPENAI_API_KEY` on the server.
+              </p>
+            </div>
+            <button className="primary-button" type="button" onClick={generateActions} disabled={isGenerating}>
+              {isGenerating ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />}
+              {isGenerating ? "Generating..." : "Generate actions"}
+            </button>
+          </div>
           {aiError ? <p className="status status--error">{aiError}</p> : null}
           {recommendations.length ? (
             <ul className="recommendation-list">
@@ -222,8 +224,8 @@ export function InsightPanels({
           ) : (
             <div className="empty-state">No AI actions generated yet for this insight.</div>
           )}
-        </div>
-      </aside>
+        </section>
+      </div>
     </div>
   );
 }

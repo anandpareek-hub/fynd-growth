@@ -20,18 +20,21 @@ function hoursAgo(hours: number) {
 
 export function resolveComparisonBundle(input: {
   preset?: DatePreset;
+  comparePreset?: DatePreset | null;
   from?: string | null;
   to?: string | null;
   compareFrom?: string | null;
   compareTo?: string | null;
 }): ComparisonBundle {
   const preset = input.preset ?? "7d";
+  const comparePreset = input.comparePreset ?? null;
 
   if (preset === "24h") {
     const currentEnd = new Date();
     const currentStart = hoursAgo(24);
+    const compareLengthHours = comparePreset === "7d" ? 24 * 7 : comparePreset === "30d" ? 24 * 30 : 24;
     const compareEnd = currentStart;
-    const compareStart = hoursAgo(48);
+    const compareStart = new Date(compareEnd.getTime() - compareLengthHours * 60 * 60 * 1000);
 
     return {
       current: {
@@ -40,7 +43,10 @@ export function resolveComparisonBundle(input: {
         to: currentEnd.toISOString(),
       },
       comparison: {
-        label: "Previous 24 hours",
+        label:
+          comparePreset && comparePreset !== "custom"
+            ? `Previous ${comparePreset === "24h" ? "24 hours" : comparePreset === "7d" ? "7 days" : "30 days"}`
+            : "Previous 24 hours",
         from: compareStart.toISOString(),
         to: compareEnd.toISOString(),
       },
@@ -50,9 +56,12 @@ export function resolveComparisonBundle(input: {
   if (preset === "custom" && input.from && input.to) {
     const currentStart = startOfDay(new Date(input.from));
     const currentEnd = startOfDay(addDays(new Date(input.to), 1));
+    const customDayLength = Math.max(1, Math.round((currentEnd.getTime() - currentStart.getTime()) / DAY_IN_MS));
+    const compareDayCount =
+      comparePreset === "24h" ? 1 : comparePreset === "30d" ? 30 : comparePreset === "7d" ? 7 : customDayLength;
     const compareStart = input.compareFrom
       ? startOfDay(new Date(input.compareFrom))
-      : addDays(currentStart, -Math.max(1, Math.round((currentEnd.getTime() - currentStart.getTime()) / DAY_IN_MS)));
+      : addDays(currentStart, -compareDayCount);
     const compareEnd = input.compareTo
       ? startOfDay(addDays(new Date(input.compareTo), 1))
       : currentStart;
@@ -74,8 +83,10 @@ export function resolveComparisonBundle(input: {
   const dayCount = preset === "30d" ? 30 : 7;
   const currentEnd = startOfDay(addDays(new Date(), 1));
   const currentStart = addDays(currentEnd, -dayCount);
+  const compareDayCount =
+    comparePreset === "24h" ? 1 : comparePreset === "30d" ? 30 : comparePreset === "7d" ? 7 : dayCount;
   const compareEnd = currentStart;
-  const compareStart = addDays(compareEnd, -dayCount);
+  const compareStart = addDays(compareEnd, -compareDayCount);
 
   return {
     current: {
@@ -84,7 +95,7 @@ export function resolveComparisonBundle(input: {
       to: currentEnd.toISOString(),
     },
     comparison: {
-      label: `Previous ${dayCount} days`,
+      label: `Previous ${compareDayCount} days`,
       from: compareStart.toISOString(),
       to: compareEnd.toISOString(),
     },
