@@ -149,15 +149,44 @@ function productScope(product: ProductKey) {
   return "";
 }
 
-function paymentCondition(token?: string | null, alias?: string) {
+function productRevenueClause(productOrToken?: ProductKey | string | null, alias?: string) {
   const prefix = alias ? `${alias}.` : "";
-  const tokenClause = token
-    ? ` AND ${lowerLike(`toString(${prefix}properties.paddle_name)`, token)}`
-    : "";
+  const nameExpression = `toString(${prefix}properties.paddle_name)`;
 
+  switch (productOrToken) {
+    case "pixelbin":
+    case "PB":
+      return ` AND (
+        ${lowerLike(nameExpression, "PB ")}
+        OR ${lowerLike(nameExpression, "Pixelbin")}
+      )`;
+    case "watermark":
+    case "WM":
+      return ` AND (
+        ${lowerLike(nameExpression, "WM ")}
+        OR ${lowerLike(nameExpression, "watermark")}
+        OR ${lowerLike(nameExpression, "WatermarkRemover")}
+      )`;
+    case "upscale":
+    case "UM":
+      return ` AND (
+        ${lowerLike(nameExpression, "UM ")}
+        OR ${lowerLike(nameExpression, "upscale")}
+      )`;
+    case "revenue":
+    case null:
+    case undefined:
+      return "";
+    default:
+      return ` AND ${lowerLike(nameExpression, String(productOrToken))}`;
+  }
+}
+
+function paymentCondition(productOrToken?: ProductKey | string | null, alias?: string) {
+  const prefix = alias ? `${alias}.` : "";
   return `${prefix}event='paddle_transaction'
     AND toString(${prefix}properties.paddle_origin)='api'
-    AND toString(${prefix}properties.paddle_event_type)='transaction.completed'${tokenClause}`;
+    AND toString(${prefix}properties.paddle_event_type)='transaction.completed'${productRevenueClause(productOrToken, alias)}`;
 }
 
 function paymentPopupCondition(product: ProductKey, alias?: string) {
@@ -817,40 +846,88 @@ function buildRevenueAttributionQuery(args: {
   return `
 WITH tx AS (
   SELECT
-    person_id AS buyer_id,
+    lower(toString(properties.paddle_email)) AS buyer_email,
     sum(${revenueExpression()}) AS revenue,
     count() AS payments
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     AND ${paymentCondition(token)}
-  GROUP BY buyer_id
+    AND ${nonEmptyExpression("toString(properties.paddle_email)")}
+  GROUP BY buyer_email
 ),
-usage AS (
+usage_events AS (
   SELECT
-    e.person_id AS buyer_id,
+    lower(toString(person.properties.email)) AS buyer_email,
     multiIf(
-      ${lowerLike("toString(e.properties.app_name)", "video-generator")} OR ${lowerLike("toString(e.properties.$current_url)", "video-generator")}, 'Video Generator',
-      ${lowerLike("toString(e.properties.app_name)", "ai-image-generator")} OR ${lowerLike("toString(e.properties.slug)", "ai-image-generator")}, 'AI Image Generator',
-      ${lowerLike("toString(e.properties.app_name)", "ai-image-editor")} OR ${lowerLike("toString(e.properties.$current_url)", "ai-image-editor")}, 'AI Image Editor',
-      ${lowerLike("toString(e.properties.page)", "studio_ai-editor")} AND (${lowerLike("toString(e.properties.tool_id)", "watermark")} OR ${lowerLike("toString(e.properties.prompt)", "watermark")}), 'Watermark remover',
-      ${lowerLike("toString(e.properties.page)", "studio_ai-editor")} AND (${lowerLike("toString(e.properties.tool_id)", "upscale")} OR ${lowerLike("toString(e.properties.prompt)", "upscale")}), 'Upscale media',
-      ${lowerLike("toString(e.properties.page)", "batch-editor")} OR ${lowerLike("toString(e.properties.$current_url)", "batch-editor")}, 'Batch Editor',
+      ${exactLower("toString(e.properties.app_name)", "video-generator")} OR ${exactLower("toString(e.properties.app_name)", "ai-video-generator")} OR ${exactLower("toString(e.properties.page)", "ai-video-generator")}, 'Video Generator',
+      ${exactLower("toString(e.properties.app_name)", "ai-image-generator")} OR ${exactLower("toString(e.properties.page)", "ai-image-generator")}, 'AI Image Generator',
+      ${exactLower("toString(e.properties.app_name)", "ai-image-editor")} OR ${exactLower("toString(e.properties.page)", "ai-image-editor")}, 'AI Image Editor',
+      ${exactLower("toString(e.properties.app_name)", "magic-canvas")}, 'Magic Canvas',
+      ${exactLower("toString(e.properties.page)", "batch-editor")}, 'Batch Editor',
+      ${exactLower("toString(e.properties.page)", "studio_ai-editor")}, 'AI Editor Studio',
       'Other'
     ) AS tool_bucket,
     count() AS usage_events
   FROM events e
-  INNER JOIN tx ON tx.buyer_id = e.person_id
   WHERE e.timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
-  GROUP BY buyer_id, tool_bucket
+    AND ${nonEmptyExpression("toString(person.properties.email)")}
+    AND (
+      toString(e.properties.app_name) IN ('video-generator', 'ai-video-generator', 'ai-image-generator', 'ai-image-editor', 'magic-canvas')
+      OR toString(e.properties.page) IN ('ai-video-generator', 'ai-image-generator', 'ai-image-editor', 'studio_ai-editor', 'batch-editor')
+    )
+  GROUP BY buyer_email, tool_bucket
+),
+editor_usage AS (
+  SELECT
+    lower(toString(person.properties.email)) AS buyer_email,
+    multiIf(
+      ${lowerLike("toString(properties.tool_id)", "watermark")} OR ${lowerLike("toString(properties.tool_id)", "wm")}, 'Watermark remover',
+      ${lowerLike("toString(properties.tool_id)", "upscale")} OR ${lowerLike("toString(properties.tool_id)", "sr")} OR ${lowerLike("toString(properties.tool_id)", "super")}, 'Upscale media',
+      ${lowerLike("toString(properties.tool_id)", "erase")} OR ${lowerLike("toString(properties.tool_id)", "bg")}, 'Erase background',
+      'AI Editor Studio'
+    ) AS tool_bucket,
+    count() AS usage_events
+  FROM events
+  WHERE event = 'AI_EDITOR_TOOL_APPLY'
+    AND timestamp >= toDateTime(${sqlLiteral(args.from)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND ${exactLower("toString(properties.page)", "studio_ai-editor")}
+    AND ${nonEmptyExpression("toString(person.properties.email)")}
+  GROUP BY buyer_email, tool_bucket
+),
+combined_usage AS (
+  SELECT buyer_email, tool_bucket, usage_events FROM usage_events
+  UNION ALL
+  SELECT buyer_email, tool_bucket, usage_events FROM editor_usage
+),
+aggregated_usage AS (
+  SELECT
+    buyer_email,
+    tool_bucket,
+    sum(usage_events) AS usage_events,
+    multiIf(
+      tool_bucket = 'Video Generator', 700,
+      tool_bucket = 'AI Image Generator', 600,
+      tool_bucket = 'AI Image Editor', 500,
+      tool_bucket = 'Magic Canvas', 400,
+      tool_bucket = 'Watermark remover', 300,
+      tool_bucket = 'Upscale media', 200,
+      tool_bucket = 'Erase background', 150,
+      tool_bucket = 'Batch Editor', 100,
+      tool_bucket = 'AI Editor Studio', 50,
+      0
+    ) AS priority_score
+  FROM combined_usage
+  GROUP BY buyer_email, tool_bucket
 ),
 primary_usage AS (
   SELECT
-    buyer_id,
-    argMax(tool_bucket, usage_events) AS primary_tool
-  FROM usage
-  GROUP BY buyer_id
+    buyer_email,
+    argMax(tool_bucket, usage_events * 1000 + priority_score) AS primary_tool
+  FROM aggregated_usage
+  GROUP BY buyer_email
 )
 SELECT
   coalesce(primary_tool, 'Unattributed') AS primary_tool,
@@ -858,7 +935,7 @@ SELECT
   sum(tx.payments) AS payments,
   count() AS buyers
 FROM tx
-LEFT JOIN primary_usage pu ON pu.buyer_id = tx.buyer_id
+LEFT JOIN primary_usage pu ON pu.buyer_email = tx.buyer_email
 GROUP BY primary_tool
 ORDER BY revenue DESC
 LIMIT 10`;
