@@ -196,6 +196,49 @@ function productRevenueClause(productOrToken?: ProductKey | string | null, alias
   }
 }
 
+/**
+ * Exclude test accounts (@gofynd.com) from HogQL queries.
+ * Matches PostHog's filterTestAccounts: true behaviour.
+ */
+function testAccountFilter(alias?: string) {
+  const prefix = alias ? `${alias}.` : "";
+  return `AND NOT ilike(toString(${prefix}person.properties.email), '%@gofynd.com%')`;
+}
+
+/**
+ * Conversion window constraint: step must occur within 14 days of the anchor.
+ */
+function conversionWindow(stepTs: string, anchorTs: string) {
+  return `${stepTs} >= ${anchorTs} AND ${stepTs} <= ${anchorTs} + INTERVAL 14 DAY`;
+}
+
+/**
+ * Paddle UTM clause to scope payment attribution to a specific product/tool.
+ * Uses paddle_utm (the attribution tag set at checkout time).
+ */
+function paddleUtmClause(product: ProductKey, mapping: ToolMapping | null, alias?: string) {
+  const prefix = alias ? `${alias}.` : "";
+  const utmExpr = `toString(${prefix}properties.paddle_utm)`;
+
+  if (mapping) {
+    // Use the mapping's app_name or key for precise utm matching
+    const utmValue = mapping.appName ?? mapping.key;
+    return ` AND lower(${utmExpr}) LIKE ${sqlLiteral(`%${utmValue.toLowerCase()}%`)}`;
+  }
+
+  // Fallback to product-level paddle_name matching
+  switch (product) {
+    case "pixelbin":
+      return ` AND (${lowerLike(utmExpr, "video-generator")} OR ${lowerLike(utmExpr, "ai-image-generator")} OR ${lowerLike(utmExpr, "image-editor")} OR ${lowerLike(utmExpr, "magic-canvas")})`;
+    case "watermark":
+      return ` AND (${lowerLike(utmExpr, "watermark")} OR ${lowerLike(`toString(${prefix}properties.paddle_name)`, "WM ")} OR ${lowerLike(`toString(${prefix}properties.paddle_name)`, "watermark")})`;
+    case "upscale":
+      return ` AND (${lowerLike(utmExpr, "upscale")} OR ${lowerLike(`toString(${prefix}properties.paddle_name)`, "UM ")} OR ${lowerLike(`toString(${prefix}properties.paddle_name)`, "upscale")})`;
+    default:
+      return "";
+  }
+}
+
 function paymentCondition(
   productOrToken?: ProductKey | string | null,
   alias?: string,
@@ -212,12 +255,20 @@ function paymentCondition(
     AND toString(${prefix}properties.paddle_event_type)='transaction.completed'${includeProductFilter ? productRevenueClause(productOrToken, alias) : ""}`;
 }
 
-function paymentPopupCondition(product: ProductKey, alias?: string) {
+function paymentPopupCondition(product: ProductKey, alias?: string, mapping?: ToolMapping | null) {
   const prefix = alias ? `${alias}.` : "";
   if (product === "watermark" || product === "upscale") {
+    // LIMIT_POPUP_TRIGGRED is already product-scoped by domain context
+    if (mapping?.freeProperty) {
+      return `${prefix}event='LIMIT_POPUP_TRIGGRED' AND ${exactLower(`toString(${prefix}properties.free_property)`, mapping.freeProperty)}`;
+    }
     return `${prefix}event='LIMIT_POPUP_TRIGGRED'`;
   }
 
+  // For pixelbin tools, scope PAYMENT_POP_UP by app_name to avoid cross-tool leaks
+  if (mapping?.appName) {
+    return `${prefix}event='PAYMENT_POP_UP' AND ${exactLower(`toString(${prefix}properties.app_name)`, mapping.appName)}`;
+  }
   return `${prefix}event='PAYMENT_POP_UP'`;
 }
 
@@ -649,21 +700,28 @@ function buildSeoFunnelQuery(args: {
   const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
   const scope = productScope(args.product);
   const mainToolClause = mainToolFilter(args.mainTool);
-  const paymentClause = paymentCondition(null, undefined, {
-    apiOnly: false,
-    includeProductFilter: false,
+  const epoch = "toDateTime('1970-01-01 00:00:00')";
+  // Payment scoped to product + origin=api (new transactions only)
+  const paymentClause = paymentCondition(args.product, undefined, {
+    apiOnly: true,
+    includeProductFilter: true,
   });
+  const paymentUtm = paddleUtmClause(args.product, mapping);
 
   if (mapping && args.identifierValue) {
     const mappedStepTwoUrl = sanitizeFreeText(args.stepUrl || mapping.consoleUrlContains) || mapping.consoleUrlContains;
     const stepOneClause = `event='${mapping.firstEvent}' AND ${mappingSeoEntryCondition(mapping)}`;
     const stepTwoClause =
       mapping.popupEvent === "LIMIT_POPUP_TRIGGRED"
-        ? mappedPopupCondition(mapping)
+        ? mappedPopupCondition(mapping, undefined)
         : `event='$pageview' AND (
           ${lowerLike("toString(properties.$current_url)", mappedStepTwoUrl)}
           OR ${lowerLike("toString(properties.$pathname)", mappedStepTwoUrl)}
         )`;
+    // Product-scoped payment: paddle_origin=api + paddle_utm matching tool
+    const scopedPayment = `event='paddle_transaction'
+      AND toString(properties.paddle_origin)='api'
+      AND toString(properties.paddle_event_type)='transaction.completed'${paymentUtm}`;
 
     return `
 WITH step1 AS (
@@ -674,17 +732,19 @@ WITH step1 AS (
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     AND ${stepOneClause}
+    ${testAccountFilter()}
   GROUP BY actor_id
 ),
 actor_rollup AS (
   SELECT
     person_id AS actor_id,
     minIf(timestamp, ${stepTwoClause}) AS step2_ts,
-    minIf(timestamp, ${paymentClause}) AS step3_ts
+    minIf(timestamp, ${scopedPayment}) AS step3_ts
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
-    AND timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND (${stepTwoClause} OR ${paymentClause})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)}) + INTERVAL 14 DAY
+    AND (${stepTwoClause} OR ${scopedPayment})
+    ${testAccountFilter()}
   GROUP BY actor_id
 )
 SELECT
@@ -693,15 +753,16 @@ SELECT
   uniqExact(s1.actor_id) AS step1_users,
   uniqExactIf(
     s1.actor_id,
-    r.step2_ts > toDateTime('1970-01-01 00:00:00')
-    AND r.step2_ts >= s1.step1_ts
+    r.step2_ts > ${epoch}
+    AND ${conversionWindow("r.step2_ts", "s1.step1_ts")}
   ) AS step2_users,
   uniqExactIf(
     s1.actor_id,
-    r.step2_ts > toDateTime('1970-01-01 00:00:00')
-    AND r.step3_ts > toDateTime('1970-01-01 00:00:00')
-    AND r.step2_ts >= s1.step1_ts
+    r.step2_ts > ${epoch}
+    AND r.step3_ts > ${epoch}
+    AND ${conversionWindow("r.step2_ts", "s1.step1_ts")}
     AND r.step3_ts >= r.step2_ts
+    AND ${conversionWindow("r.step3_ts", "s1.step1_ts")}
   ) AS step3_users
 FROM step1 s1
 LEFT JOIN actor_rollup r ON r.actor_id = s1.actor_id`;
@@ -709,8 +770,12 @@ LEFT JOIN actor_rollup r ON r.actor_id = s1.actor_id`;
 
   const stepTwoClause =
     args.product === "watermark" || args.product === "upscale"
-      ? paymentPopupCondition(args.product)
+      ? paymentPopupCondition(args.product, undefined, mapping)
       : `event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault, "")}`;
+  // Product-scoped payment for the generic (non-mapped) path
+  const scopedPayment = `event='paddle_transaction'
+    AND toString(properties.paddle_origin)='api'
+    AND toString(properties.paddle_event_type)='transaction.completed'${paymentUtm}`;
 
   return `
 WITH step1 AS (
@@ -726,17 +791,19 @@ WITH step1 AS (
     ${identifierFilter}
     ${scope}
     ${mainToolClause}
+    ${testAccountFilter()}
   GROUP BY actor_id, identifier_value
 ),
 actor_rollup AS (
   SELECT
     person_id AS actor_id,
     minIf(timestamp, ${stepTwoClause}) AS step2_ts,
-    minIf(timestamp, ${paymentClause}) AS step3_ts
+    minIf(timestamp, ${scopedPayment}) AS step3_ts
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
-    AND timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND (${stepTwoClause} OR ${paymentClause})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)}) + INTERVAL 14 DAY
+    AND (${stepTwoClause} OR ${scopedPayment})
+    ${testAccountFilter()}
   GROUP BY actor_id
 )
 SELECT
@@ -745,15 +812,16 @@ SELECT
   uniqExact(s1.actor_id) AS step1_users,
   uniqExactIf(
     s1.actor_id,
-    r.step2_ts > toDateTime('1970-01-01 00:00:00')
-    AND r.step2_ts >= s1.step1_ts
+    r.step2_ts > ${epoch}
+    AND ${conversionWindow("r.step2_ts", "s1.step1_ts")}
   ) AS step2_users,
   uniqExactIf(
     s1.actor_id,
-    r.step2_ts > toDateTime('1970-01-01 00:00:00')
-    AND r.step3_ts > toDateTime('1970-01-01 00:00:00')
-    AND r.step2_ts >= s1.step1_ts
+    r.step2_ts > ${epoch}
+    AND r.step3_ts > ${epoch}
+    AND ${conversionWindow("r.step2_ts", "s1.step1_ts")}
     AND r.step3_ts >= r.step2_ts
+    AND ${conversionWindow("r.step3_ts", "s1.step1_ts")}
   ) AS step3_users
 FROM step1 s1
 LEFT JOIN actor_rollup r ON r.actor_id = s1.actor_id
@@ -770,17 +838,20 @@ function buildConsoleQuery(args: {
 }) {
   const mapping = resolveToolMapping(args.product, args.consoleUrl, args.consoleUrl);
   const mappedConsoleUrl = sanitizeFreeText(args.consoleUrl || mapping?.consoleUrlContains) || mapping?.consoleUrlContains || args.consoleUrl;
+  const epoch = "toDateTime('1970-01-01 00:00:00')";
   const stepOneCondition = mapping
     ? `event='$pageview' AND (
         ${lowerLike("toString(properties.$current_url)", mappedConsoleUrl)}
         OR ${lowerLike("toString(properties.$pathname)", mappedConsoleUrl)}
       )`
     : `event='$pageview' AND ${lowerLike("toString(properties.$current_url)", args.consoleUrl)}`;
-  const popupCondition = mapping ? mappedPopupCondition(mapping) : paymentPopupCondition(args.product);
-  const paymentClause = paymentCondition(null, undefined, {
-    apiOnly: false,
-    includeProductFilter: false,
-  });
+  // Product-scoped popup condition (filters by app_name / free_property)
+  const popupCondition = mapping ? mappedPopupCondition(mapping) : paymentPopupCondition(args.product, undefined, mapping);
+  // Product-scoped payment: origin=api + paddle_utm for the tool
+  const paymentUtm = paddleUtmClause(args.product, mapping);
+  const scopedPayment = `event='paddle_transaction'
+    AND toString(properties.paddle_origin)='api'
+    AND toString(properties.paddle_event_type)='transaction.completed'${paymentUtm}`;
 
   return `
 WITH actor_rollup AS (
@@ -788,28 +859,30 @@ WITH actor_rollup AS (
     person_id AS actor_id,
     minIf(timestamp, ${stepOneCondition}) AS step1_ts,
     minIf(timestamp, ${popupCondition}) AS step2_ts,
-    minIf(timestamp, ${paymentClause}) AS step3_ts
+    minIf(timestamp, ${scopedPayment}) AS step3_ts
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
-    AND timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND (${stepOneCondition} OR ${popupCondition} OR ${paymentClause})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)}) + INTERVAL 14 DAY
+    AND (${stepOneCondition} OR ${popupCondition} OR ${scopedPayment})
+    ${testAccountFilter()}
   GROUP BY actor_id
 )
 SELECT
-  uniqExactIf(actor_id, step1_ts > toDateTime('1970-01-01 00:00:00')) AS step1_users,
+  uniqExactIf(actor_id, step1_ts > ${epoch}) AS step1_users,
   uniqExactIf(
     actor_id,
-    step1_ts > toDateTime('1970-01-01 00:00:00')
-    AND step2_ts > toDateTime('1970-01-01 00:00:00')
-    AND step2_ts >= step1_ts
+    step1_ts > ${epoch}
+    AND step2_ts > ${epoch}
+    AND ${conversionWindow("step2_ts", "step1_ts")}
   ) AS step2_users,
   uniqExactIf(
     actor_id,
-    step1_ts > toDateTime('1970-01-01 00:00:00')
-    AND step2_ts > toDateTime('1970-01-01 00:00:00')
-    AND step3_ts > toDateTime('1970-01-01 00:00:00')
-    AND step2_ts >= step1_ts
+    step1_ts > ${epoch}
+    AND step2_ts > ${epoch}
+    AND step3_ts > ${epoch}
+    AND ${conversionWindow("step2_ts", "step1_ts")}
     AND step3_ts >= step2_ts
+    AND ${conversionWindow("step3_ts", "step1_ts")}
   ) AS step3_users
 FROM actor_rollup`;
 }
@@ -849,6 +922,7 @@ WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
   ${scope}
   ${identifierFilter}
   ${identifierConstraint}
+  ${testAccountFilter()}
 GROUP BY ${identifierGroupBy}raw_error, error_details
 ORDER BY error_count DESC
 LIMIT 40`;
@@ -863,7 +937,7 @@ function buildPerformanceRollupQuery(args: {
 }) {
   const scope = productScope(args.product);
   const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
-  const popupCondition = paymentPopupCondition(args.product);
+  const popupCondition = paymentPopupCondition(args.product, undefined, null);
 
   return `
 WITH scoped_users AS (
@@ -873,6 +947,7 @@ WITH scoped_users AS (
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     ${scope}
     ${identifierFilter}
+    ${testAccountFilter()}
 ),
 failed_users AS (
   SELECT
@@ -883,6 +958,7 @@ failed_users AS (
     AND ${failureFilter()}
     ${scope}
     ${identifierFilter}
+    ${testAccountFilter()}
   GROUP BY actor_id
 ),
 popup_users AS (
@@ -892,6 +968,7 @@ popup_users AS (
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     AND ${popupCondition}
+    ${testAccountFilter()}
   GROUP BY actor_id
 )
 SELECT
@@ -925,6 +1002,7 @@ WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
   AND (${modelExpression()} != '' OR ${promptExpression()} != '' OR ${inputExpression()} != '')
   ${scope}
   ${identifierFilter}
+  ${testAccountFilter()}
 GROUP BY event_name
 ORDER BY sample_count DESC
 LIMIT 10`;
@@ -955,6 +1033,7 @@ WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
   AND ${failureFilter()}
   ${scope}
   AND ${nonEmptyExpression(identifierExpr)}
+  ${testAccountFilter()}
 GROUP BY identifier_value
 ORDER BY impacted_users DESC, failures DESC
 LIMIT 12`;
@@ -969,7 +1048,7 @@ function buildPerformanceJourneyQuery(args: {
 }) {
   const scope = productScope(args.product);
   const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
-  const popupCondition = paymentPopupCondition(args.product);
+  const popupCondition = paymentPopupCondition(args.product, undefined, null);
 
   return `
 WITH actor_rollup AS (
@@ -983,6 +1062,7 @@ WITH actor_rollup AS (
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     ${scope}
     ${identifierFilter}
+    ${testAccountFilter()}
   GROUP BY actor_id
 )
 SELECT
@@ -1154,9 +1234,10 @@ function buildNoDiscoveryQuery(args: {
   const config = PRODUCT_CONFIGS[args.product];
   const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
   const mapping = resolveToolMapping(args.product, args.identifierValue, args.stepUrl ?? args.mainTool);
+  const epoch = "toDateTime('1970-01-01 00:00:00')";
   const stepTwoCondition =
     args.product === "watermark" || args.product === "upscale"
-      ? paymentPopupCondition(args.product)
+      ? paymentPopupCondition(args.product, undefined, mapping)
       : `event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault, "")}`;
 
   if (mapping) {
@@ -1178,6 +1259,7 @@ WITH step1 AS (
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     AND event='${mapping.firstEvent}'
     AND ${mappingSeoEntryCondition(mapping)}
+    ${testAccountFilter()}
   GROUP BY actor_id
 ),
 step2 AS (
@@ -1186,7 +1268,9 @@ step2 AS (
     minIf(timestamp, ${mappedStepTwoCondition}) AS step2_ts
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
-    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)}) + INTERVAL 14 DAY
+    AND (${mappedStepTwoCondition})
+    ${testAccountFilter()}
   GROUP BY actor_id
 ),
 post_step2 AS (
@@ -1199,20 +1283,20 @@ post_step2 AS (
   FROM events e
   INNER JOIN step2 s2 ON s2.actor_id = e.person_id
   WHERE e.timestamp >= toDateTime(${sqlLiteral(args.from)})
-    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND s2.step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND e.timestamp < toDateTime(${sqlLiteral(args.to)}) + INTERVAL 14 DAY
+    AND s2.step2_ts > ${epoch}
   GROUP BY actor_id
 )
 SELECT
   uniqExactIf(
     s.actor_id,
-    s2.step2_ts > toDateTime('1970-01-01 00:00:00')
-    AND s2.step2_ts >= s.step1_ts
+    s2.step2_ts > ${epoch}
+    AND ${conversionWindow("s2.step2_ts", "s.step1_ts")}
   ) AS reached_step2,
   uniqExactIf(
     s.actor_id,
-    s2.step2_ts > toDateTime('1970-01-01 00:00:00')
-    AND s2.step2_ts >= s.step1_ts
+    s2.step2_ts > ${epoch}
+    AND ${conversionWindow("s2.step2_ts", "s.step1_ts")}
     AND coalesce(p.post_events, 0) = 0
   ) AS no_discovery_users
 FROM step1 s
@@ -1230,6 +1314,7 @@ WITH step1 AS (
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     ${identifierFilter}
     ${productScope(args.product)}
+    ${testAccountFilter()}
   GROUP BY actor_id
 ),
 step2 AS (
@@ -1238,7 +1323,9 @@ step2 AS (
     minIf(timestamp, ${stepTwoCondition}) AS step2_ts
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
-    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)}) + INTERVAL 14 DAY
+    AND (${stepTwoCondition})
+    ${testAccountFilter()}
   GROUP BY actor_id
 ),
 post_step2 AS (
@@ -1248,21 +1335,21 @@ post_step2 AS (
   FROM events e
   INNER JOIN step2 s2 ON s2.actor_id = e.person_id
   WHERE e.timestamp >= toDateTime(${sqlLiteral(args.from)})
-    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND s2.step2_ts > toDateTime('1970-01-01 00:00:00')
+    AND e.timestamp < toDateTime(${sqlLiteral(args.to)}) + INTERVAL 14 DAY
+    AND s2.step2_ts > ${epoch}
     AND e.timestamp > s2.step2_ts
   GROUP BY actor_id
 )
 SELECT
   uniqExactIf(
     s.actor_id,
-    s2.step2_ts > toDateTime('1970-01-01 00:00:00')
-    AND s2.step2_ts >= s.step1_ts
+    s2.step2_ts > ${epoch}
+    AND ${conversionWindow("s2.step2_ts", "s.step1_ts")}
   ) AS reached_step2,
   uniqExactIf(
     s.actor_id,
-    s2.step2_ts > toDateTime('1970-01-01 00:00:00')
-    AND s2.step2_ts >= s.step1_ts
+    s2.step2_ts > ${epoch}
+    AND ${conversionWindow("s2.step2_ts", "s.step1_ts")}
     AND coalesce(p.post_events, 0) = 0
   ) AS no_discovery_users
 FROM step1 s
@@ -1282,17 +1369,17 @@ function buildFunnelStageInsightsQuery(args: {
   const config = PRODUCT_CONFIGS[args.product];
   const mapping = resolveToolMapping(args.product, args.identifierValue, args.stepUrl ?? args.mainTool);
   const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
-  const paymentClause = paymentCondition(null, undefined, {
-    apiOnly: false,
-    includeProductFilter: false,
-  });
+  const paymentUtm = paddleUtmClause(args.product, mapping);
+  const scopedPayment = `event='paddle_transaction'
+    AND toString(properties.paddle_origin)='api'
+    AND toString(properties.paddle_event_type)='transaction.completed'${paymentUtm}`;
   const epoch = "toDateTime('1970-01-01 00:00:00')";
 
   const stepTwoClause =
     args.product === "watermark" || args.product === "upscale"
       ? mapping
         ? mappedPopupCondition(mapping)
-        : paymentPopupCondition(args.product)
+        : paymentPopupCondition(args.product, undefined, mapping)
       : mapping
         ? `event='$pageview' AND (
             ${lowerLike("toString(properties.$current_url)", sanitizeFreeText(args.stepUrl || mapping.consoleUrlContains) || mapping.consoleUrlContains)}
@@ -1300,7 +1387,7 @@ function buildFunnelStageInsightsQuery(args: {
           )`
         : `event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault, "")}`;
 
-  const popupClause = mapping ? mappedPopupCondition(mapping) : paymentPopupCondition(args.product);
+  const popupClause = mapping ? mappedPopupCondition(mapping) : paymentPopupCondition(args.product, undefined, mapping);
   const failureClauseEvent = mapping ? `(${failureFilter()}) AND ${mappingScopeCondition(mapping, "e")}` : failureFilter();
   const successClauseEvent = mapping
     ? `(${successEventCondition(args.product, "e")}) AND ${mappingScopeCondition(mapping, "e")}`
@@ -1317,6 +1404,7 @@ step1 AS (
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     AND event='${mapping.firstEvent}'
     AND ${mappingSeoEntryCondition(mapping)}
+    ${testAccountFilter()}
   GROUP BY actor_id
 )`
     : `
@@ -1330,6 +1418,7 @@ step1 AS (
     ${identifierFilter}
     ${productScope(args.product)}
     ${mainToolFilter(args.mainTool)}
+    ${testAccountFilter()}
   GROUP BY actor_id
 )`;
 
@@ -1341,11 +1430,12 @@ actor_rollup AS (
     minIf(timestamp, ${stepTwoClause}) AS step2_ts,
     minIf(timestamp, ${popupClause}) AS popup_ts,
     minIf(timestamp, event='CHECKOUT_INITIATED') AS checkout_ts,
-    minIf(timestamp, ${paymentClause}) AS step3_ts
+    minIf(timestamp, ${scopedPayment}) AS step3_ts
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
-    AND timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND (${stepTwoClause} OR ${popupClause} OR event='CHECKOUT_INITIATED' OR ${paymentClause})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)}) + INTERVAL 14 DAY
+    AND (${stepTwoClause} OR ${popupClause} OR event='CHECKOUT_INITIATED' OR ${scopedPayment})
+    ${testAccountFilter()}
   GROUP BY actor_id
 ),
 actor_metrics AS (
@@ -1358,38 +1448,40 @@ actor_metrics AS (
     r.step3_ts AS step3_ts,
     countIf(
       e.timestamp >= s1.step1_ts
-      AND e.timestamp < if(r.step2_ts > ${epoch}, r.step2_ts, toDateTime(${sqlLiteral(args.to)}))
+      AND e.timestamp < if(r.step2_ts > ${epoch}, r.step2_ts, s1.step1_ts + INTERVAL 14 DAY)
       AND ${failureClauseEvent}
     ) AS pre_step2_failures,
     countIf(
       r.step2_ts > ${epoch}
       AND e.timestamp >= r.step2_ts
+      AND e.timestamp <= s1.step1_ts + INTERVAL 14 DAY
       AND ${failureClauseEvent}
     ) AS post_step2_failures,
     countIf(
       r.step2_ts > ${epoch}
       AND e.timestamp >= r.step2_ts
+      AND e.timestamp <= s1.step1_ts + INTERVAL 14 DAY
       AND ${successClauseEvent}
     ) AS post_step2_successes
   FROM step1 s1
   LEFT JOIN actor_rollup r ON r.actor_id = s1.actor_id
   LEFT JOIN events e ON e.person_id = s1.actor_id
     AND e.timestamp >= s1.step1_ts
-    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND e.timestamp <= s1.step1_ts + INTERVAL 14 DAY
   GROUP BY s1.actor_id, s1.step1_ts, r.step2_ts, r.popup_ts, r.checkout_ts, r.step3_ts
 )
 SELECT
   uniqExact(actor_id) AS step1_users,
   uniqExactIf(actor_id, pre_step2_failures > 0) AS step1_failure_users,
-  uniqExactIf(actor_id, popup_ts > ${epoch}) AS step1_popup_users,
-  uniqExactIf(actor_id, checkout_ts > ${epoch}) AS step1_checkout_users,
-  uniqExactIf(actor_id, step2_ts > ${epoch}) AS step2_users,
-  uniqExactIf(actor_id, step2_ts > ${epoch} AND popup_ts > ${epoch} AND popup_ts >= step2_ts) AS step2_popup_users,
-  uniqExactIf(actor_id, step2_ts > ${epoch} AND post_step2_failures > 0) AS step2_failure_users,
-  uniqExactIf(actor_id, step2_ts > ${epoch} AND post_step2_successes > 0) AS step2_success_users,
-  uniqExactIf(actor_id, step2_ts > ${epoch} AND checkout_ts > ${epoch} AND checkout_ts >= step2_ts) AS step2_checkout_users,
-  uniqExactIf(actor_id, step2_ts > ${epoch} AND step3_ts > ${epoch} AND step3_ts >= step2_ts) AS step2_paid_users,
-  uniqExactIf(actor_id, step3_ts > ${epoch}) AS step3_users
+  uniqExactIf(actor_id, popup_ts > ${epoch} AND ${conversionWindow("popup_ts", "step1_ts")}) AS step1_popup_users,
+  uniqExactIf(actor_id, checkout_ts > ${epoch} AND ${conversionWindow("checkout_ts", "step1_ts")}) AS step1_checkout_users,
+  uniqExactIf(actor_id, step2_ts > ${epoch} AND ${conversionWindow("step2_ts", "step1_ts")}) AS step2_users,
+  uniqExactIf(actor_id, step2_ts > ${epoch} AND ${conversionWindow("step2_ts", "step1_ts")} AND popup_ts > ${epoch} AND popup_ts >= step2_ts) AS step2_popup_users,
+  uniqExactIf(actor_id, step2_ts > ${epoch} AND ${conversionWindow("step2_ts", "step1_ts")} AND post_step2_failures > 0) AS step2_failure_users,
+  uniqExactIf(actor_id, step2_ts > ${epoch} AND ${conversionWindow("step2_ts", "step1_ts")} AND post_step2_successes > 0) AS step2_success_users,
+  uniqExactIf(actor_id, step2_ts > ${epoch} AND ${conversionWindow("step2_ts", "step1_ts")} AND checkout_ts > ${epoch} AND checkout_ts >= step2_ts) AS step2_checkout_users,
+  uniqExactIf(actor_id, step2_ts > ${epoch} AND ${conversionWindow("step2_ts", "step1_ts")} AND step3_ts > ${epoch} AND step3_ts >= step2_ts AND ${conversionWindow("step3_ts", "step1_ts")}) AS step2_paid_users,
+  uniqExactIf(actor_id, step3_ts > ${epoch} AND ${conversionWindow("step3_ts", "step1_ts")}) AS step3_users
 FROM actor_metrics`;
 }
 
@@ -1405,17 +1497,17 @@ function buildFunnelStageEventMixQuery(args: {
   const config = PRODUCT_CONFIGS[args.product];
   const mapping = resolveToolMapping(args.product, args.identifierValue, args.stepUrl ?? args.mainTool);
   const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
-  const paymentClause = paymentCondition(null, undefined, {
-    apiOnly: false,
-    includeProductFilter: false,
-  });
+  const paymentUtm = paddleUtmClause(args.product, mapping);
+  const scopedPayment = `event='paddle_transaction'
+    AND toString(properties.paddle_origin)='api'
+    AND toString(properties.paddle_event_type)='transaction.completed'${paymentUtm}`;
   const epoch = "toDateTime('1970-01-01 00:00:00')";
 
   const stepTwoClause =
     args.product === "watermark" || args.product === "upscale"
       ? mapping
         ? mappedPopupCondition(mapping)
-        : paymentPopupCondition(args.product)
+        : paymentPopupCondition(args.product, undefined, mapping)
       : mapping
         ? `event='$pageview' AND (
             ${lowerLike("toString(properties.$current_url)", sanitizeFreeText(args.stepUrl || mapping.consoleUrlContains) || mapping.consoleUrlContains)}
@@ -1423,7 +1515,7 @@ function buildFunnelStageEventMixQuery(args: {
           )`
         : `event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault, "")}`;
 
-  const popupClause = mapping ? mappedPopupCondition(mapping) : paymentPopupCondition(args.product);
+  const popupClause = mapping ? mappedPopupCondition(mapping) : paymentPopupCondition(args.product, undefined, mapping);
   const excludedEvents = [
     "$pageview",
     "$autocapture",
@@ -1463,6 +1555,7 @@ step1 AS (
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     AND event='${mapping.firstEvent}'
     AND ${mappingSeoEntryCondition(mapping)}
+    ${testAccountFilter()}
   GROUP BY actor_id
 )`
     : `
@@ -1476,6 +1569,7 @@ step1 AS (
     ${identifierFilter}
     ${productScope(args.product)}
     ${mainToolFilter(args.mainTool)}
+    ${testAccountFilter()}
   GROUP BY actor_id
 )`;
 
@@ -1487,11 +1581,12 @@ actor_rollup AS (
     minIf(timestamp, ${stepTwoClause}) AS step2_ts,
     minIf(timestamp, ${popupClause}) AS popup_ts,
     minIf(timestamp, event='CHECKOUT_INITIATED') AS checkout_ts,
-    minIf(timestamp, ${paymentClause}) AS step3_ts
+    minIf(timestamp, ${scopedPayment}) AS step3_ts
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
-    AND timestamp < toDateTime(${sqlLiteral(args.to)})
-    AND (${stepTwoClause} OR ${popupClause} OR event='CHECKOUT_INITIATED' OR ${paymentClause})
+    AND timestamp < toDateTime(${sqlLiteral(args.to)}) + INTERVAL 14 DAY
+    AND (${stepTwoClause} OR ${popupClause} OR event='CHECKOUT_INITIATED' OR ${scopedPayment})
+    ${testAccountFilter()}
   GROUP BY actor_id
 ),
 base AS (
@@ -1513,7 +1608,7 @@ base AS (
   INNER JOIN step1 s1 ON s1.actor_id = e.person_id
   LEFT JOIN actor_rollup r ON r.actor_id = e.person_id
   WHERE e.timestamp >= s1.step1_ts
-    AND e.timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND e.timestamp <= s1.step1_ts + INTERVAL 14 DAY
     AND e.event NOT IN (${excludedEvents})
     AND (
       e.event IN (${focusedEvents})
