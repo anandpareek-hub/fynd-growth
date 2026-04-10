@@ -772,10 +772,12 @@ LEFT JOIN actor_rollup r ON r.actor_id = s1.actor_id`;
     args.product === "watermark" || args.product === "upscale"
       ? paymentPopupCondition(args.product, undefined, mapping)
       : `event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault, "")}`;
-  // Product-scoped payment for the generic (non-mapped) path
-  const scopedPayment = `event='paddle_transaction'
-    AND toString(properties.paddle_origin)='api'
-    AND toString(properties.paddle_event_type)='transaction.completed'${paymentUtm}`;
+  // Generic SEO path: product-level payment scope (paddle_name matching PB/WM/UM),
+  // not tool-level paddle_utm — many payments don't have specific tool UTMs.
+  const scopedPayment = paymentCondition(args.product, undefined, {
+    apiOnly: true,
+    includeProductFilter: true,
+  });
 
   return `
 WITH step1 AS (
@@ -847,11 +849,13 @@ function buildConsoleQuery(args: {
     : `event='$pageview' AND ${lowerLike("toString(properties.$current_url)", args.consoleUrl)}`;
   // Product-scoped popup condition (filters by app_name / free_property)
   const popupCondition = mapping ? mappedPopupCondition(mapping) : paymentPopupCondition(args.product, undefined, mapping);
-  // Product-scoped payment: origin=api + paddle_utm for the tool
-  const paymentUtm = paddleUtmClause(args.product, mapping);
-  const scopedPayment = `event='paddle_transaction'
-    AND toString(properties.paddle_origin)='api'
-    AND toString(properties.paddle_event_type)='transaction.completed'${paymentUtm}`;
+  // Console funnel payment: product-level scope (paddle_name matching PB/WM/UM),
+  // NOT tool-level paddle_utm — matches PostHog F2 reference which has no tool attribution on payment.
+  // The funnel ordering (studio visit → popup → payment) already provides the conversion linkage.
+  const scopedPayment = paymentCondition(args.product, undefined, {
+    apiOnly: true,
+    includeProductFilter: true,
+  });
 
   return `
 WITH actor_rollup AS (
@@ -1369,10 +1373,11 @@ function buildFunnelStageInsightsQuery(args: {
   const config = PRODUCT_CONFIGS[args.product];
   const mapping = resolveToolMapping(args.product, args.identifierValue, args.stepUrl ?? args.mainTool);
   const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
-  const paymentUtm = paddleUtmClause(args.product, mapping);
-  const scopedPayment = `event='paddle_transaction'
-    AND toString(properties.paddle_origin)='api'
-    AND toString(properties.paddle_event_type)='transaction.completed'${paymentUtm}`;
+  // Product-level payment scope (not tool-level paddle_utm)
+  const scopedPayment = paymentCondition(args.product, undefined, {
+    apiOnly: true,
+    includeProductFilter: true,
+  });
   const epoch = "toDateTime('1970-01-01 00:00:00')";
 
   const stepTwoClause =
@@ -1497,10 +1502,11 @@ function buildFunnelStageEventMixQuery(args: {
   const config = PRODUCT_CONFIGS[args.product];
   const mapping = resolveToolMapping(args.product, args.identifierValue, args.stepUrl ?? args.mainTool);
   const identifierFilter = withIdentifierFilter(args.identifierType, args.identifierValue);
-  const paymentUtm = paddleUtmClause(args.product, mapping);
-  const scopedPayment = `event='paddle_transaction'
-    AND toString(properties.paddle_origin)='api'
-    AND toString(properties.paddle_event_type)='transaction.completed'${paymentUtm}`;
+  // Product-level payment scope (not tool-level paddle_utm)
+  const scopedPayment = paymentCondition(args.product, undefined, {
+    apiOnly: true,
+    includeProductFilter: true,
+  });
   const epoch = "toDateTime('1970-01-01 00:00:00')";
 
   const stepTwoClause =
