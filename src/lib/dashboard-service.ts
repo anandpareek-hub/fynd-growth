@@ -847,15 +847,17 @@ function buildConsoleQuery(args: {
         OR ${lowerLike("toString(properties.$pathname)", mappedConsoleUrl)}
       )`
     : `event='$pageview' AND ${lowerLike("toString(properties.$current_url)", args.consoleUrl)}`;
-  // Product-scoped popup condition (filters by app_name / free_property)
-  const popupCondition = mapping ? mappedPopupCondition(mapping) : paymentPopupCondition(args.product, undefined, mapping);
-  // Console funnel payment: product-level scope (paddle_name matching PB/WM/UM),
-  // NOT tool-level paddle_utm — matches PostHog F2 reference which has no tool attribution on payment.
-  // The funnel ordering (studio visit → popup → payment) already provides the conversion linkage.
-  const scopedPayment = paymentCondition(args.product, undefined, {
-    apiOnly: true,
-    includeProductFilter: true,
-  });
+  // Console funnel (F2) matches PostHog's native ordered funnel exactly:
+  // - Step 2 (popup): NO app_name/free_property filter — any PAYMENT_POP_UP / LIMIT_POPUP_TRIGGRED
+  // - Step 3 (payment): NO product filter — just paddle_origin=api + transaction.completed
+  // The funnel ORDERING (studio visit → popup → payment) already provides conversion linkage.
+  const popupCondition =
+    args.product === "watermark" || args.product === "upscale"
+      ? `event='LIMIT_POPUP_TRIGGRED'`
+      : `event='PAYMENT_POP_UP'`;
+  const scopedPayment = `event='paddle_transaction'
+    AND toString(properties.paddle_origin)='api'
+    AND toString(properties.paddle_event_type)='transaction.completed'`;
 
   return `
 WITH actor_rollup AS (
