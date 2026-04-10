@@ -321,40 +321,33 @@ function inputExpression() {
   )`;
 }
 
+/**
+ * Failure filter matching PostHog error analysis patterns.
+ * Uses specific failure events (not wildcard) + user_type=external filter.
+ * The FAILURE_IGNORE_PATTERNS still exclude content-policy and credit noise.
+ */
 function failureFilter() {
   const errorExpr = `lower(${errorMessageExpression()})`;
-  const eventExpr = "lower(event)";
   const ignore = FAILURE_IGNORE_PATTERNS.map((pattern) =>
     `${errorExpr} NOT LIKE ${sqlLiteral(`%${pattern}%`)}`,
   );
-  const technicalSignals = [
-    `${errorExpr} LIKE '%network%'`,
-    `${errorExpr} LIKE '%validation failed%'`,
-    `${errorExpr} LIKE '%timeout%'`,
-    `${errorExpr} LIKE '%timed out%'`,
-    `${errorExpr} LIKE '%status code%'`,
-    `${errorExpr} LIKE '%unexpected status%'`,
-    `${errorExpr} LIKE '%503%'`,
-    `${errorExpr} LIKE '%502%'`,
-    `${errorExpr} LIKE '%500%'`,
-    `${errorExpr} LIKE '%422%'`,
-    `${errorExpr} LIKE '%fetch failed%'`,
-    `${errorExpr} LIKE '%backend%'`,
-    `${errorExpr} LIKE '%server%'`,
-    `${errorExpr} LIKE '%connection%'`,
-    `${errorExpr} LIKE '%upload failed%'`,
-    `${errorExpr} LIKE '%no response%'`,
-    `${eventExpr} IN ('generation_failed', 'video_generation_failed', 'image_transformation_failed', 'dynamic_app_transformation_failed', 'dynamic_app_transformation_polling_failed', 'dynamic_app_video_failed', 'dynamic_app_file_upload_failed', 'image_upload_failed', 'video_upload_failed')`,
+  // Match specific failure events — these are the real error events in PostHog
+  const failureEvents = [
+    "GENERATION_FAILED",
+    "VIDEO_GENERATION_FAILED",
+    "DYNAMIC_APP_VIDEO_FAILED",
+    "DYNAMIC_APP_TRANSFORMATION_FAILED",
+    "DYNAMIC_APP_TRANSFORMATION_POLLING_FAILED",
+    "IMAGE_TRANSFORMATION_FAILED",
+    "DYNAMIC_APP_FILE_UPLOAD_FAILED",
+    "IMAGE_UPLOAD_FAILED",
+    "VIDEO_UPLOAD_FAILED",
   ];
+  const failureEventList = failureEvents.map((e) => sqlLiteral(e)).join(", ");
 
   return `(
-    (
-      ${eventExpr} LIKE '%failed%'
-      OR ${eventExpr} LIKE '%error%'
-      OR ${errorExpr} LIKE '%fail%'
-      OR ${errorExpr} LIKE '%error%'
-    )
-    AND (${technicalSignals.join(" OR ")})
+    event IN (${failureEventList})
+    AND (toString(properties.user_type) = 'external' OR toString(properties.user_type) = '')
   ) AND ${ignore.join(" AND ")}`;
 }
 
@@ -488,6 +481,7 @@ const TOOL_MAPPINGS: ToolMapping[] = [
     seoUrlContains: "video-watermark-remover",
     consoleUrlContains: "video-watermark-remover",
     popupEvent: "LIMIT_POPUP_TRIGGRED",
+    freeProperty: "video-watermark-remover",
   },
   {
     product: "upscale",
@@ -1127,20 +1121,24 @@ function buildRevenueAttributionQuery(args: {
   from: string;
   to: string;
 }) {
+  const token = PRODUCT_CONFIGS[args.product].revenueToken;
+  // For the "revenue" product tab, show ALL products; otherwise scope to specific product
+  const revenueClause = args.product === "revenue" ? "" : productRevenueClause(token);
+
   return `
 WITH tx AS (
   SELECT
     lower(toString(properties.paddle_email)) AS buyer_email,
+    ${revenueCategoryExpression()} AS product_category,
     sum(${revenueExpression()}) AS revenue,
     count() AS payments
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     AND event='paddle_transaction'
-    AND toString(properties.paddle_event_type)='transaction.completed'
-    ${productRevenueClause("PB")}
+    AND toString(properties.paddle_event_type)='transaction.completed'${revenueClause}
     AND ${nonEmptyExpression("toString(properties.paddle_email)")}
-  GROUP BY buyer_email
+  GROUP BY buyer_email, product_category
 ),
 usage_events AS (
   SELECT
@@ -1218,14 +1216,15 @@ primary_usage AS (
 )
 SELECT
   coalesce(nullIf(primary_tool, ''), 'No Tool Usage') AS primary_tool,
+  tx.product_category AS product_category,
   sum(tx.revenue) AS revenue,
   sum(tx.payments) AS payments,
   count() AS buyers
 FROM tx
 LEFT JOIN primary_usage pu ON pu.buyer_email = tx.buyer_email
-GROUP BY primary_tool
+GROUP BY primary_tool, product_category
 ORDER BY revenue DESC
-LIMIT 12`;
+LIMIT 20`;
 }
 
 function buildNoDiscoveryQuery(args: {
