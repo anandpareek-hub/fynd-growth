@@ -1,6 +1,7 @@
 import {
   FAILURE_IGNORE_PATTERNS,
   IDENTIFIER_LABELS,
+  LIMIT_EVENTS,
   PRODUCT_CONFIGS,
   VIEW_LABELS,
 } from "@/lib/config";
@@ -322,6 +323,15 @@ function inputExpression() {
 }
 
 /**
+ * Exclude limit/quota events from step1 argMin so they don't appear as "first event".
+ */
+function excludeLimitEvents(alias?: string) {
+  const prefix = alias ? `${alias}.` : "";
+  const limitList = LIMIT_EVENTS.map((e) => sqlLiteral(e)).join(", ");
+  return `AND ${prefix}event NOT IN (${limitList})`;
+}
+
+/**
  * Failure filter matching PostHog error analysis patterns.
  * Uses specific failure events (not wildcard) + user_type=external filter.
  * The FAILURE_IGNORE_PATTERNS still exclude content-policy and credit noise.
@@ -339,6 +349,7 @@ function failureFilter() {
     "DYNAMIC_APP_TRANSFORMATION_FAILED",
     "DYNAMIC_APP_TRANSFORMATION_POLLING_FAILED",
     "IMAGE_TRANSFORMATION_FAILED",
+    "IMG_TO_IMG_TRANSFORMATION_FAILED",
     "DYNAMIC_APP_FILE_UPLOAD_FAILED",
     "IMAGE_UPLOAD_FAILED",
     "VIDEO_UPLOAD_FAILED",
@@ -487,7 +498,7 @@ const TOOL_MAPPINGS: ToolMapping[] = [
     product: "upscale",
     key: "upscalemedia",
     aliases: ["upscalemedia", "image-upscaler", "mini-studio/upscaler"],
-    firstEvent: "IMAGE_TRANSFORMED",
+    firstEvent: "IMAGE_UPLOAD_ACTION",
     seoUrlContains: "upscale.media",
     consoleUrlContains: "mini-studio/upscaler",
     popupEvent: "LIMIT_POPUP_TRIGGRED",
@@ -787,6 +798,7 @@ WITH step1 AS (
     ${identifierFilter}
     ${scope}
     ${mainToolClause}
+    ${excludeLimitEvents()}
     ${testAccountFilter()}
   GROUP BY actor_id, identifier_value
 ),
@@ -1424,6 +1436,7 @@ step1 AS (
     ${identifierFilter}
     ${productScope(args.product)}
     ${mainToolFilter(args.mainTool)}
+    ${excludeLimitEvents()}
     ${testAccountFilter()}
   GROUP BY actor_id
 )`;
@@ -1576,6 +1589,7 @@ step1 AS (
     ${identifierFilter}
     ${productScope(args.product)}
     ${mainToolFilter(args.mainTool)}
+    ${excludeLimitEvents()}
     ${testAccountFilter()}
   GROUP BY actor_id
 )`;

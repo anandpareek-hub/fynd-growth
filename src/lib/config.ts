@@ -122,6 +122,16 @@ export const FAILURE_IGNORE_PATTERNS = [
   "not a valid tiktok link",
 ];
 
+/**
+ * Events that look like failures but are actually usage limits — not technical errors.
+ * Must be excluded from SEO funnel step1 (argMin) and from error tables.
+ */
+export const LIMIT_EVENTS = [
+  "DYNAMIC_APP_DAILY_LIMIT_EXCEEDED",
+  "DYNAMIC_APP_VIDEO_LIMIT_REACHED",
+  "IMG_TO_IMG_FREE_TRIAL_LIMIT_REACHED",
+];
+
 export const PIXELBIN_TOOL_SUGGESTIONS = [
   "video-generator",
   "ai-image-generator",
