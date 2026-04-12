@@ -49,7 +49,7 @@ export const PRODUCT_CONFIGS: Record<ProductKey, ProductConfig> = {
     defaultConsoleUrl: "mini-studio/watermarkremover",
     funnelIdentifierTypes: ["free_property", "other"],
     performanceIdentifierTypes: ["free_property", "page", "other"],
-    views: ["seo-funnels", "console-funnels", "product-performance", "revenue-insights"],
+    views: ["seo-funnels", "product-performance", "revenue-insights"],
     stepTwoDefault: "LIMIT_POPUP_TRIGGRED",
   },
   upscale: {
@@ -62,7 +62,7 @@ export const PRODUCT_CONFIGS: Record<ProductKey, ProductConfig> = {
     defaultConsoleUrl: "mini-studio/upscaler",
     funnelIdentifierTypes: ["free_property", "other"],
     performanceIdentifierTypes: ["free_property", "page", "other"],
-    views: ["seo-funnels", "console-funnels", "product-performance", "revenue-insights"],
+    views: ["seo-funnels", "product-performance", "revenue-insights"],
     stepTwoDefault: "LIMIT_POPUP_TRIGGRED",
   },
   revenue: {

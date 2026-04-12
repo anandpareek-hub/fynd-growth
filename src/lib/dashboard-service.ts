@@ -500,13 +500,14 @@ const TOOL_MAPPINGS: ToolMapping[] = [
     seoUrlContains: "video-watermark-remover",
     consoleUrlContains: "video-watermark-remover",
     popupEvent: "LIMIT_POPUP_TRIGGRED",
-    freeProperty: "video-watermark-remover",
+    // Video WM events use free_property='watermarkremover' (same as image WM)
+    freeProperty: "watermarkremover",
   },
   {
     product: "upscale",
     key: "upscalemedia",
     aliases: ["upscalemedia", "image-upscaler", "mini-studio/upscaler"],
-    firstEvent: "IMAGE_UPLOAD_ACTION",
+    firstEvent: "IMAGE_UPLOADED",
     seoUrlContains: "upscale.media",
     consoleUrlContains: "mini-studio/upscaler",
     popupEvent: "LIMIT_POPUP_TRIGGRED",
@@ -714,27 +715,26 @@ function buildSeoFunnelQuery(args: {
   const scope = productScope(args.product);
   const mainToolClause = mainToolFilter(args.mainTool);
   const epoch = "toDateTime('1970-01-01 00:00:00')";
-  // Payment scoped to product + origin=api (new transactions only)
-  const paymentClause = paymentCondition(args.product, undefined, {
-    apiOnly: true,
-    includeProductFilter: true,
-  });
-  const paymentUtm = paddleUtmClause(args.product, mapping);
+  const isFreesite = args.product === "watermark" || args.product === "upscale";
+  // WM/Upscale: include all payments (renewals too), scoped by paddle_name
+  // PB: new transactions only (paddle_origin=api), scoped by paddle_utm
+  const scopedPayment = isFreesite
+    ? `event='paddle_transaction'
+      AND toString(properties.paddle_event_type)='transaction.completed'${productRevenueClause(PRODUCT_CONFIGS[args.product].revenueToken)}`
+    : `event='paddle_transaction'
+      AND toString(properties.paddle_origin)='api'
+      AND toString(properties.paddle_event_type)='transaction.completed'${paddleUtmClause(args.product, mapping)}`;
 
   if (mapping && args.identifierValue) {
     const mappedStepTwoUrl = sanitizeFreeText(args.stepUrl || mapping.consoleUrlContains) || mapping.consoleUrlContains;
     const stepOneClause = `event='${mapping.firstEvent}' AND ${mappingSeoEntryCondition(mapping)}`;
     const stepTwoClause =
       mapping.popupEvent === "LIMIT_POPUP_TRIGGRED"
-        ? mappedPopupCondition(mapping, undefined)
+        ? `event='LIMIT_POPUP_TRIGGRED'`
         : `event='$pageview' AND (
           ${lowerLike("toString(properties.$current_url)", mappedStepTwoUrl)}
           OR ${lowerLike("toString(properties.$pathname)", mappedStepTwoUrl)}
         )`;
-    // Product-scoped payment: paddle_origin=api + paddle_utm matching tool
-    const scopedPayment = `event='paddle_transaction'
-      AND toString(properties.paddle_origin)='api'
-      AND toString(properties.paddle_event_type)='transaction.completed'${paymentUtm}`;
 
     return `
 WITH step1 AS (
@@ -782,15 +782,10 @@ LEFT JOIN actor_rollup r ON r.actor_id = s1.actor_id`;
   }
 
   const stepTwoClause =
-    args.product === "watermark" || args.product === "upscale"
-      ? paymentPopupCondition(args.product, undefined, mapping)
+    isFreesite
+      ? `event='LIMIT_POPUP_TRIGGRED'`
       : `event='$pageview' AND ${withStepUrl(args.stepUrl, config.stepTwoDefault, "")}`;
-  // Generic SEO path: product-level payment scope (paddle_name matching PB/WM/UM),
-  // not tool-level paddle_utm — many payments don't have specific tool UTMs.
-  const scopedPayment = paymentCondition(args.product, undefined, {
-    apiOnly: true,
-    includeProductFilter: true,
-  });
+  // Generic path reuses the same scopedPayment defined above
 
   return `
 WITH step1 AS (
