@@ -775,7 +775,7 @@ SELECT
     AND r.step3_ts > ${epoch}
     AND ${conversionWindow("r.step2_ts", "s1.step1_ts")}
     AND r.step3_ts >= r.step2_ts
-    AND ${conversionWindow("r.step3_ts", "s1.step1_ts")}
+    AND ${conversionWindow("r.step3_ts", "r.step2_ts")}
   ) AS step3_users
 FROM step1 s1
 LEFT JOIN actor_rollup r ON r.actor_id = s1.actor_id`;
@@ -837,7 +837,7 @@ SELECT
     AND r.step3_ts > ${epoch}
     AND ${conversionWindow("r.step2_ts", "s1.step1_ts")}
     AND r.step3_ts >= r.step2_ts
-    AND ${conversionWindow("r.step3_ts", "s1.step1_ts")}
+    AND ${conversionWindow("r.step3_ts", "r.step2_ts")}
   ) AS step3_users
 FROM step1 s1
 LEFT JOIN actor_rollup r ON r.actor_id = s1.actor_id
@@ -902,7 +902,7 @@ SELECT
     AND step3_ts > ${epoch}
     AND ${conversionWindow("step2_ts", "step1_ts")}
     AND step3_ts >= step2_ts
-    AND ${conversionWindow("step3_ts", "step1_ts")}
+    AND ${conversionWindow("step3_ts", "step2_ts")}
   ) AS step3_users
 FROM actor_rollup`;
 }
@@ -1507,8 +1507,8 @@ SELECT
   uniqExactIf(actor_id, step2_ts > ${epoch} AND ${conversionWindow("step2_ts", "step1_ts")} AND post_step2_failures > 0) AS step2_failure_users,
   uniqExactIf(actor_id, step2_ts > ${epoch} AND ${conversionWindow("step2_ts", "step1_ts")} AND post_step2_successes > 0) AS step2_success_users,
   uniqExactIf(actor_id, step2_ts > ${epoch} AND ${conversionWindow("step2_ts", "step1_ts")} AND checkout_ts > ${epoch} AND checkout_ts >= step2_ts) AS step2_checkout_users,
-  uniqExactIf(actor_id, step2_ts > ${epoch} AND ${conversionWindow("step2_ts", "step1_ts")} AND step3_ts > ${epoch} AND step3_ts >= step2_ts AND ${conversionWindow("step3_ts", "step1_ts")}) AS step2_paid_users,
-  uniqExactIf(actor_id, step3_ts > ${epoch} AND ${conversionWindow("step3_ts", "step1_ts")}) AS step3_users
+  uniqExactIf(actor_id, step2_ts > ${epoch} AND ${conversionWindow("step2_ts", "step1_ts")} AND step3_ts > ${epoch} AND step3_ts >= step2_ts AND ${conversionWindow("step3_ts", "step2_ts")}) AS step2_paid_users,
+  uniqExactIf(actor_id, step3_ts > ${epoch} AND ${conversionWindow("step3_ts", "step2_ts")}) AS step3_users
 FROM actor_metrics`;
 }
 

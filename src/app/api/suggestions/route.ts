@@ -11,6 +11,12 @@ type SuggestionRow = {
 
 function identifierExpression(type: IdentifierType) {
   switch (type) {
+    case "slug":
+      return "toString(properties.slug)";
+    case "appslug":
+      return "coalesce(nullIf(toString(properties.appslug), ''), nullIf(toString(properties.appSlug), ''), '')";
+    case "plugin":
+      return "toString(properties.plugin)";
     case "operationID":
       return "coalesce(nullIf(toString(properties.operationID), ''), nullIf(toString(properties.operationId), ''), '')";
     case "app_name":
@@ -19,6 +25,8 @@ function identifierExpression(type: IdentifierType) {
       return "coalesce(nullIf(toString(properties.page), ''), nullIf(toString(properties.$pathname), ''), '')";
     case "free_property":
       return "toString(properties.free_property)";
+    case "other":
+      return "coalesce(nullIf(toString(properties.$current_url), ''), nullIf(toString(properties.page), ''), '')";
     default:
       return "''";
   }
