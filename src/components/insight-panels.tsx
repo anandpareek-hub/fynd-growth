@@ -10,6 +10,7 @@ type InsightPanelsProps = {
   payload: DashboardPayload;
   onOpenQuery: (queryKey: string) => void;
   detailLinkBuilder?: (identifier: string) => string | null;
+  onDetailClick?: (identifier: string) => void;
   businessContext?: {
     productDescription?: string;
     icpDescription?: string;
@@ -74,6 +75,7 @@ export function InsightPanels({
   payload,
   onOpenQuery,
   detailLinkBuilder,
+  onDetailClick,
   businessContext,
 }: InsightPanelsProps) {
   const [recommendations, setRecommendations] = useState<string[]>([]);
@@ -189,16 +191,27 @@ export function InsightPanels({
                   </thead>
                   <tbody>
                     {table.rows.map((row, index) => {
+                      const identifierStr = typeof row.identifier === "string" ? row.identifier : null;
                       const detailHref =
-                        detailLinkBuilder && typeof row.identifier === "string"
-                          ? detailLinkBuilder(row.identifier)
+                        detailLinkBuilder && identifierStr
+                          ? detailLinkBuilder(identifierStr)
                           : null;
+                      const canClick = onDetailClick && identifierStr;
 
                       return (
                         <tr key={`${table.id}-${index}`}>
                           {table.columns.map((column) => (
                             <td key={column.key} className={column.align === "right" ? "align-right" : undefined}>
-                              {column.key === "identifier" && detailHref ? (
+                              {column.key === "identifier" && canClick ? (
+                                <button
+                                  type="button"
+                                  className="row-link"
+                                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", color: "inherit", textDecoration: "underline" }}
+                                  onClick={() => onDetailClick(identifierStr)}
+                                >
+                                  {String(row[column.key] ?? "")}
+                                </button>
+                              ) : column.key === "identifier" && detailHref ? (
                                 <Link className="row-link" href={detailHref}>
                                   {String(row[column.key] ?? "")}
                                 </Link>

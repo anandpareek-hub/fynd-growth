@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useEffect, useMemo, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
 import {
   BriefcaseBusiness,
   Filter,
@@ -8,6 +8,7 @@ import {
   Loader2,
   RefreshCcw,
   Sparkles,
+  X,
 } from "lucide-react";
 
 import { ChartStudio } from "@/components/chart-studio";
@@ -30,6 +31,7 @@ import type {
   ProductKey,
   ViewKey,
 } from "@/lib/dashboard-types";
+import { FunnelDetail } from "@/components/funnel-detail";
 import { InsightPanels, QueryModal } from "@/components/insight-panels";
 
 type DashboardResponse = {
@@ -460,6 +462,7 @@ export function DashboardShell() {
   const [isLoading, setIsLoading] = useState(true);
   const [queryKey, setQueryKey] = useState<string | null>(null);
   const [manualQuery, setManualQuery] = useState<InsightQuery | null>(null);
+  const [drawerFunnel, setDrawerFunnel] = useState<{ identifier: string } | null>(null);
 
   const activeConfig = PRODUCT_CONFIGS[filters.product];
   const showIdentifierFilters = filters.view === "seo-funnels" || filters.view === "product-performance";
@@ -715,6 +718,17 @@ export function DashboardShell() {
 
     return `/funnel/${filters.product}?${searchParams.toString()}`;
   }
+
+  const handleDetailClick = useCallback(
+    (identifier: string) => {
+      setDrawerFunnel({ identifier });
+    },
+    [],
+  );
+
+  const closeDrawer = useCallback(() => {
+    setDrawerFunnel(null);
+  }, []);
 
   return (
     <div className="app-shell">
@@ -1051,6 +1065,7 @@ export function DashboardShell() {
                     payload={result.payload}
                     onOpenQuery={setQueryKey}
                     detailLinkBuilder={filters.view === "seo-funnels" && !filters.consolidate ? buildDetailLink : undefined}
+                    onDetailClick={filters.view === "seo-funnels" && !filters.consolidate ? handleDetailClick : undefined}
                     businessContext={businessContext}
                   />
                 ) : (
@@ -1071,6 +1086,41 @@ export function DashboardShell() {
           setManualQuery(null);
         }}
       />
+
+      {/* Funnel detail slide-over drawer */}
+      {drawerFunnel ? (
+        <div className="drawer-backdrop" onClick={closeDrawer}>
+          <div
+            className="drawer-panel"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              className="drawer-close"
+              type="button"
+              onClick={closeDrawer}
+              aria-label="Close drawer"
+            >
+              <X size={18} />
+            </button>
+            <div className="drawer-content">
+              <FunnelDetail
+                product={filters.product}
+                preset={filters.preset}
+                comparePreset={filters.comparePreset}
+                identifierType={filters.identifierType}
+                identifierValue={drawerFunnel.identifier}
+                from={filters.from || undefined}
+                to={filters.to || undefined}
+                compareFrom={filters.compareFrom || undefined}
+                compareTo={filters.compareTo || undefined}
+                mainTool={filters.mainTool || undefined}
+                stepUrl={filters.stepUrl || undefined}
+                onClose={closeDrawer}
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

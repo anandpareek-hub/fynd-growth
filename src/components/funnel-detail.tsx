@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Loader2 } from "lucide-react";
+import { ArrowLeft, Loader2, X } from "lucide-react";
 
 import { PRODUCT_CONFIGS } from "@/lib/config";
 import type { DashboardPayload, DatePreset, IdentifierType, ProductKey } from "@/lib/dashboard-types";
@@ -20,6 +20,7 @@ type FunnelDetailProps = {
   compareTo?: string;
   mainTool?: string;
   stepUrl?: string;
+  onClose?: () => void;
 };
 
 type DashboardResponse = {
@@ -86,12 +87,19 @@ export function FunnelDetail(props: FunnelDetailProps) {
   }, [payload, queryKey]);
 
   return (
-    <div className="detail-page">
+    <div className={props.onClose ? "detail-page detail-page--embedded" : "detail-page"}>
       <div className="detail-page__top">
-        <Link className="ghost-button" href="/">
-          <ArrowLeft size={16} />
-          Back to dashboard
-        </Link>
+        {props.onClose ? (
+          <button className="ghost-button" type="button" onClick={props.onClose}>
+            <X size={16} />
+            Close
+          </button>
+        ) : (
+          <Link className="ghost-button" href="/">
+            <ArrowLeft size={16} />
+            Back to dashboard
+          </Link>
+        )}
         <div>
           <p className="eyebrow">{PRODUCT_CONFIGS[props.product].label}</p>
           <h1>Funnel detail</h1>
