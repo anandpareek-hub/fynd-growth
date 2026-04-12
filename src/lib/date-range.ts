@@ -85,13 +85,17 @@ function previousWindowForPreset(preset: DatePreset, currentFrom: string, curren
   }
 
   if (preset === "thisMonth") {
+    // Compare same MTD range in previous month (e.g., Apr 1-12 → Mar 1-12)
+    const currentEnd = new Date(currentTo);
     const thisMonthStart = startOfMonth(new Date(currentFrom));
+    const elapsedDays = Math.round((currentEnd.getTime() - thisMonthStart.getTime()) / DAY_IN_MS);
     const previousMonthStart = startOfMonth(addMonths(thisMonthStart, -1));
+    const previousMonthEnd = addDays(previousMonthStart, elapsedDays);
 
     return {
-      label: "Last month",
+      label: `${toIsoDate(previousMonthStart)} to ${toIsoDate(addDays(previousMonthEnd, -1))}`,
       from: previousMonthStart.toISOString(),
-      to: thisMonthStart.toISOString(),
+      to: previousMonthEnd.toISOString(),
     };
   }
 

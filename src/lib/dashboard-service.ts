@@ -873,38 +873,57 @@ function buildConsoleQuery(args: {
     AND toString(properties.paddle_origin)='api'
     AND toString(properties.paddle_event_type)='transaction.completed'`;
 
+  // Rebuild popup/payment conditions with 'e.' prefix for step CTEs
+  const popupConditionAliased =
+    args.product === "watermark" || args.product === "upscale"
+      ? `e.event='LIMIT_POPUP_TRIGGRED'`
+      : `e.event='PAYMENT_POP_UP'`;
+  const scopedPaymentAliased = `e.event='paddle_transaction'
+    AND toString(e.properties.paddle_origin)='api'
+    AND toString(e.properties.paddle_event_type)='transaction.completed'`;
+
+  // Use step-by-step CTEs (like PostHog's ordered funnel) to ensure
+  // step2 happens AFTER step1, and step3 happens AFTER step2.
   return `
-WITH actor_rollup AS (
+WITH step1 AS (
   SELECT
     person_id AS actor_id,
-    minIf(timestamp, ${stepOneCondition}) AS step1_ts,
-    minIf(timestamp, ${popupCondition}) AS step2_ts,
-    minIf(timestamp, ${scopedPayment}) AS step3_ts
+    min(timestamp) AS step1_ts
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
-    AND timestamp < toDateTime(${sqlLiteral(args.to)}) + INTERVAL 14 DAY
-    AND (${stepOneCondition} OR ${popupCondition} OR ${scopedPayment})
-    ${testAccountFilter()}
+    AND timestamp < toDateTime(${sqlLiteral(args.to)})
+    AND ${stepOneCondition}
+  GROUP BY actor_id
+),
+step2 AS (
+  SELECT
+    e.person_id AS actor_id,
+    min(e.timestamp) AS step2_ts
+  FROM events e
+  INNER JOIN step1 s1 ON s1.actor_id = e.person_id
+  WHERE e.timestamp > s1.step1_ts
+    AND e.timestamp <= s1.step1_ts + INTERVAL 14 DAY
+    AND ${popupConditionAliased}
+  GROUP BY actor_id
+),
+step3 AS (
+  SELECT
+    e.person_id AS actor_id,
+    min(e.timestamp) AS step3_ts
+  FROM events e
+  INNER JOIN step2 s2 ON s2.actor_id = e.person_id
+  WHERE e.timestamp > s2.step2_ts
+    AND e.timestamp <= s2.step2_ts + INTERVAL 14 DAY
+    AND ${scopedPaymentAliased}
   GROUP BY actor_id
 )
 SELECT
-  uniqExactIf(actor_id, step1_ts > ${epoch}) AS step1_users,
-  uniqExactIf(
-    actor_id,
-    step1_ts > ${epoch}
-    AND step2_ts > ${epoch}
-    AND ${conversionWindow("step2_ts", "step1_ts")}
-  ) AS step2_users,
-  uniqExactIf(
-    actor_id,
-    step1_ts > ${epoch}
-    AND step2_ts > ${epoch}
-    AND step3_ts > ${epoch}
-    AND ${conversionWindow("step2_ts", "step1_ts")}
-    AND step3_ts >= step2_ts
-    AND ${conversionWindow("step3_ts", "step2_ts")}
-  ) AS step3_users
-FROM actor_rollup`;
+  uniqExact(s1.actor_id) AS step1_users,
+  uniqExact(s2.actor_id) AS step2_users,
+  uniqExact(s3.actor_id) AS step3_users
+FROM step1 s1
+LEFT JOIN step2 s2 ON s2.actor_id = s1.actor_id
+LEFT JOIN step3 s3 ON s3.actor_id = s2.actor_id`;
 }
 
 function buildPerformanceErrorsQuery(args: {
