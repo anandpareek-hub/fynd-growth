@@ -274,9 +274,13 @@ function paymentPopupCondition(product: ProductKey, alias?: string, mapping?: To
 }
 
 function errorMessageExpression() {
+  // properties.error is the primary error field (console tools)
+  // properties.error_message is JSON on free sites (WM, Upscale) — extract with JSONExtractString
+  // Filter out '{}' empty objects from upscale.media (false signal: gate/paywall mislogged as error)
   return `coalesce(
     nullIf(toString(properties.error), ''),
-    nullIf(toString(properties.error_message), ''),
+    nullIf(nullIf(JSONExtractString(toString(properties.error_message), 'message'), ''), '{}'),
+    nullIf(nullIf(toString(properties.error_message), ''), '{}'),
     nullIf(toString(properties.errorMessage), ''),
     nullIf(toString(properties.reason), ''),
     nullIf(toString(properties.message), ''),
@@ -295,9 +299,13 @@ function errorDetailExpression() {
 }
 
 function modelExpression() {
+  // model_selected is on PROMPT_ENTER and VIDEO_GENERATION_FAILED
+  // modelId is on DYNAMIC_APP_VIDEO_FAILED
+  // model_id / model are fallbacks
   return `coalesce(
-    nullIf(toString(properties.model_id), ''),
+    nullIf(toString(properties.model_selected), ''),
     nullIf(toString(properties.modelId), ''),
+    nullIf(toString(properties.model_id), ''),
     nullIf(toString(properties.model), ''),
     ''
   )`;
@@ -358,7 +366,7 @@ function failureFilter() {
 
   return `(
     event IN (${failureEventList})
-    AND (toString(properties.user_type) = 'external' OR toString(properties.user_type) = '')
+    AND toString(properties.user_type) != 'internal'
   ) AND ${ignore.join(" AND ")}`;
 }
 
