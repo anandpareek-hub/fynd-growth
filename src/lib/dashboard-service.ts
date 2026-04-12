@@ -1142,23 +1142,24 @@ function buildRevenueAttributionQuery(args: {
   to: string;
 }) {
   const token = PRODUCT_CONFIGS[args.product].revenueToken;
-  // For the "revenue" product tab, show ALL products; otherwise scope to specific product
+  // For pixelbin product tab, scope to PB plans; for revenue tab show all
   const revenueClause = args.product === "revenue" ? "" : productRevenueClause(token);
 
   return `
 WITH tx AS (
   SELECT
     lower(toString(properties.paddle_email)) AS buyer_email,
-    ${revenueCategoryExpression()} AS product_category,
     sum(${revenueExpression()}) AS revenue,
-    count() AS payments
+    count() AS payments,
+    sumIf(${revenueExpression()}, toString(properties.paddle_origin)='api') AS new_revenue,
+    countIf(toString(properties.paddle_origin)='api') AS new_payments
   FROM events
   WHERE timestamp >= toDateTime(${sqlLiteral(args.from)})
     AND timestamp < toDateTime(${sqlLiteral(args.to)})
     AND event='paddle_transaction'
     AND toString(properties.paddle_event_type)='transaction.completed'${revenueClause}
     AND ${nonEmptyExpression("toString(properties.paddle_email)")}
-  GROUP BY buyer_email, product_category
+  GROUP BY buyer_email
 ),
 usage_events AS (
   SELECT
@@ -1236,15 +1237,16 @@ primary_usage AS (
 )
 SELECT
   coalesce(nullIf(primary_tool, ''), 'No Tool Usage') AS primary_tool,
-  tx.product_category AS product_category,
   sum(tx.revenue) AS revenue,
+  sum(tx.new_revenue) AS new_revenue,
   sum(tx.payments) AS payments,
-  count() AS buyers
+  sum(tx.new_payments) AS new_payments,
+  uniqExact(tx.buyer_email) AS buyers
 FROM tx
 LEFT JOIN primary_usage pu ON pu.buyer_email = tx.buyer_email
-GROUP BY primary_tool, product_category
+GROUP BY primary_tool
 ORDER BY revenue DESC
-LIMIT 20`;
+LIMIT 15`;
 }
 
 function buildNoDiscoveryQuery(args: {
@@ -2356,37 +2358,53 @@ async function buildRevenuePayload(request: DashboardRequest): Promise<Dashboard
       buyers: toNumber(row?.buyers),
     };
   });
+  // Image/Video generation tools (excluding WM/Upscale/EraseBG operations in AI Editor)
+  const IMG_VIDEO_TOOLS = ["Video Generator", "AI Image Generator", "AI Image Editor", "Magic Canvas"];
+
   const attributionMapped = attributionRows.map((row) => ({
     tool: toStringValue(row.primary_tool),
     revenueValue: toNumber(row.revenue),
+    newRevenueValue: toNumber(row.new_revenue),
     revenue: currency(toNumber(row.revenue)),
+    newRevenue: currency(toNumber(row.new_revenue)),
     payments: toNumber(row.payments),
+    newPayments: toNumber(row.new_payments),
     buyers: toNumber(row.buyers),
     contribution: totalRevenue === 0 ? "0%" : percent((toNumber(row.revenue) / totalRevenue) * 100),
   }));
   const attributionTotal = attributionMapped.reduce((sum, row) => sum + row.revenueValue, 0);
+  const imgVideoNewRevenue = attributionMapped
+    .filter((row) => IMG_VIDEO_TOOLS.includes(row.tool))
+    .reduce((sum, row) => sum + row.newRevenueValue, 0);
+  const totalNewRevForAttribution = attributionMapped.reduce((sum, row) => sum + row.newRevenueValue, 0);
+  const imgVideoNewRevPct = totalNewRevForAttribution === 0 ? 0 : (imgVideoNewRevenue / totalNewRevForAttribution) * 100;
+
   const attributionDisplayRows = [
-    ...attributionMapped.map((row) => {
-      const { revenueValue, ...displayRow } = row;
-      void revenueValue;
-      return displayRow;
-    }),
+    ...attributionMapped.map((row) => ({
+      tool: row.tool,
+      revenue: row.revenue,
+      newRevenue: row.newRevenue,
+      payments: row.payments,
+      buyers: row.buyers,
+      contribution: row.contribution,
+    })),
     {
       tool: "TOTAL",
       revenue: currency(attributionTotal),
-      payments: "",
-      buyers: "",
+      newRevenue: currency(totalNewRevForAttribution),
+      payments: attributionMapped.reduce((sum, row) => sum + row.payments, 0),
+      buyers: attributionMapped.reduce((sum, row) => sum + row.buyers, 0),
       contribution: "100%",
     },
   ];
 
   const callouts: Callout[] = [
     {
-      id: "rev-guide",
-      eyebrow: "Interpretation",
-      title: "Use the attribution table to prioritize monetization work",
-      body: "The highest-revenue tool buckets are where checkout friction or output quality regressions will hurt the most. Keep paddle as the single source of truth and use this attribution only to rank where to investigate next.",
-      tone: "neutral",
+      id: "rev-img-video",
+      eyebrow: "Image & Video tools",
+      title: `${percent(imgVideoNewRevPct)} of new revenue from image & video generation tools`,
+      body: `${currency(imgVideoNewRevenue)} new revenue from Video Generator, AI Image Generator, AI Image Editor, and Magic Canvas (excluding WM/Upscale/EraseBG operations in AI Editor). ${totalNewRevForAttribution > 0 ? `Total new revenue across all tools: ${currency(totalNewRevForAttribution)}.` : ""}`,
+      tone: imgVideoNewRevPct > 50 ? "positive" : "neutral",
       queryKey: "rev-attribution",
     },
   ];
@@ -2413,11 +2431,14 @@ async function buildRevenuePayload(request: DashboardRequest): Promise<Dashboard
       {
         id: "rev-attribution-table",
         title: "Revenue by tool",
-        description: "Buyer revenue attributed to the dominant tool used in-period. % Rev uses PB revenue only as the denominator.",
+        description: "Buyer revenue attributed to dominant tool used in-period. New Rev = paddle_origin=api (first-time purchases).",
         queryKey: "rev-attribution",
         columns: [
           { key: "tool", label: "Tool" },
-          { key: "revenue", label: "Est Revenue", align: "right" },
+          { key: "revenue", label: "Total Rev", align: "right" },
+          { key: "newRevenue", label: "New Rev", align: "right" },
+          { key: "payments", label: "Payments", align: "right" },
+          { key: "buyers", label: "Buyers", align: "right" },
           { key: "contribution", label: "% Rev", align: "right" },
         ],
         rows: attributionDisplayRows,
